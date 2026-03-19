@@ -1,0 +1,20 @@
+# حساسات وأسرار محلية — لا ترفعها للمستودع
+config.h
+.env
+.env.*
+!.env.example
+sandy/secrets.h
+esp32cam_stream/secrets.h
+sandy_config.py
+
+# ملفات مؤقتة للنظام أو البايثون
+__pycache__/
+*.pyc
+.DS_Store
+
+# مخلفات التشغيل
+*.mp3
+sandy_memory.json
+Screenshot*
+faces/
+faces/
