@@ -8,7 +8,7 @@
 #include <Arduino_ConnectionHandler.h>
 
 
-const int ledPin   = 2;
+
 const int servoPin = 13;
 const int TRIG_PIN = 5;
 const int ECHO_PIN = 19;
@@ -115,12 +115,12 @@ long measureDistance() {
 void playToneNote(int freq, int dur) {
   if (!ENABLE_MELODY_BUZZER) return;
   if (freq > 0) {
-    ledcWriteTone(MELODY_BUZZER, freq); 
+    ledcWriteTone(0, freq); 
   } else {
-    ledcWriteTone(MELODY_BUZZER, 0); 
+    ledcWriteTone(0, 0); 
   }
   delay(dur);
-  ledcWriteTone(MELODY_BUZZER, 0); 
+  ledcWriteTone(0, 0); 
   delay(30); 
 }
 
@@ -128,7 +128,7 @@ void playMelody(const int* notes, const int* durations, int length) {
   for (int i = 0; i < length; i++) {
     playToneNote(notes[i], durations[i]);
   }
-  ledcWriteTone(MELODY_BUZZER, 0);
+  ledcWriteTone(0, 0);
 }
 
 void melodyBoot() {
@@ -316,9 +316,8 @@ void handleShowText() {
 
 String executeCommand(String command) {
   command.trim();
-  if      (command == "LED_ON")       { digitalWrite(ledPin, HIGH); return "OK_LED_ON"; }
-  else if (command == "LED_OFF")      { digitalWrite(ledPin, LOW);  return "OK_LED_OFF"; }
-  else if (command == "LOOK_LEFT")    { moveNeckTo(55);  return "OK_LEFT"; }
+  
+  if (command == "LOOK_LEFT")    { moveNeckTo(55);  return "OK_LEFT"; }
   else if (command == "LOOK_RIGHT")   { moveNeckTo(125); return "OK_RIGHT"; }
   else if (command == "LOOK_CENTER")  { moveNeckTo(90);  return "OK_CENTER"; }
   else if (command == "SCAN_POS_1")   { moveNeckTo(55);  return "OK_SCAN1"; }
@@ -409,14 +408,14 @@ void setup() {
   ArduinoCloud.addProperty(buzzer_cmd, READWRITE, ON_CHANGE, onBuzzerCmdChange);
   ArduinoCloud.begin(ArduinoIoTPreferredConnection);
 
-  pinMode(ledPin,   OUTPUT); digitalWrite(ledPin, LOW);
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
 
   // 2. Configure PWM for the passive buzzer
   if (ENABLE_MELODY_BUZZER) {
-    ledcAttach(MELODY_BUZZER, BUZZER_BASE_FREQ, BUZZER_RESOLUTION);
-    ledcWriteTone(MELODY_BUZZER, 0); // mute just in case
+    ledcAttachPin(MELODY_BUZZER, 0);
+    ledcSetup(0, BUZZER_BASE_FREQ, BUZZER_RESOLUTION);
+    ledcWriteTone(0, 0); // mute just in case
   }
 
   ensureServoAttached();
@@ -465,7 +464,11 @@ void setup() {
 
 void loop() {
   ArduinoCloud.update();
-  distance_cm = measureDistance();
+  static unsigned long lastDist = 0;
+  if (millis() - lastDist > 200) {
+    lastDist = millis();
+    distance_cm = measureDistance();
+  }
   releaseServoIfIdle();
   server.handleClient();
   

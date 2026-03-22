@@ -31,7 +31,7 @@ SANDY_IP          = os.getenv('SANDY_IP', '192.168.8.100').strip()
 CAM_IP            = os.getenv('CAM_IP', '192.168.8.150').strip()
 OPENAI_API_KEY    = os.getenv('OPENAI_API_KEY')
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
-OPENAI_MODEL      = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+OPENAI_MODEL      = os.getenv('OPENAI_MODEL', 'gpt-4.1-mini')
 OPENAI_MAX_TOKENS = 100
 DOTENV_PATH       = os.path.join(os.path.dirname(__file__), '.env')
 MEMORY_FILE       = "sandy_memory.json"
@@ -41,7 +41,7 @@ if not OPENAI_API_KEY:
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError("TELEGRAM_BOT_TOKEN is missing from .env")
 
-TTS_RATE          = '+25%'
+TTS_RATE          = '+35%'
 EMOJI_FONT        = '/System/Library/Fonts/Apple Color Emoji.ttc'
 IMG_W, IMG_H, EMOJI_SIZE = 240, 240, 200
 

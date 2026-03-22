@@ -2,11 +2,14 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include "secrets.h"
+#include "thingProperties.h"
 
-// Static IP so I always know where the camera lives
+// Static IP so I always know where the camera is on the router
 IPAddress local_IP(192, 168, 8, 150);
 IPAddress gateway(192, 168, 8, 1);
 IPAddress subnet(255, 255, 255, 0);
+IPAddress primaryDNS(8, 8, 8, 8);
+IPAddress secondaryDNS(1, 1, 1, 1);
 
 // Pin map for my AI Thinker board
 #define PWDN_GPIO_NUM     32
@@ -27,8 +30,16 @@ IPAddress subnet(255, 255, 255, 0);
 #define PCLK_GPIO_NUM     22
 
 WebServer server(80);
+const char* SNAPSHOT_TOKEN = CAMERA_SNAPSHOT_TOKEN;
 
 void handleSnapshot() {
+  if (SNAPSHOT_TOKEN && strlen(SNAPSHOT_TOKEN) > 0) {
+    if (!server.hasArg("token") || server.arg("token") != SNAPSHOT_TOKEN) {
+      server.send(401, "text/plain", "Unauthorized");
+      Serial.println("❌ Snapshot denied: invalid token");
+      return;
+    }
+  }
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) {
     server.send(500, "text/plain", "Camera Error");
@@ -42,6 +53,7 @@ void handleSnapshot() {
 
 void setup() {
   Serial.begin(115200);
+  initProperties();
   
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -58,34 +70,38 @@ void setup() {
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size = FRAMESIZE_VGA;
   config.jpeg_quality = 10;
-  config.fb_count = 1;
+  config.fb_count = 2;
 
   if (esp_camera_init(&config) != ESP_OK) ESP.restart();
 
-  // Flip the image so the orientation matches the physical mount
+  // flip the image so the orientation matches robot on my desk
   sensor_t* s = esp_camera_sensor_get();
   if (s) s->set_vflip(s, 1);
 
-  // Lock the IP before connecting
-  if (!WiFi.config(local_IP, gateway, subnet)) {
+  // this is to lock the IP before connecting
+  if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
     Serial.println("❌ Failed to set static IP");
   }
 
+  Serial.print("Connecting to WiFi");
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
+  ArduinoCloud.begin(ArduinoIoTPreferredConnection);
 
-  Serial.println("\n✅ Camera ready!");
+  Serial.println("\n that's goood! Camera ready!");
   Serial.print("📍 URL: http://");
   Serial.print(WiFi.localIP());
   Serial.println("/snapshot");
 
+  Serial.println("☁️  Arduino IoT Cloud synced.");
   server.on("/snapshot", HTTP_GET, handleSnapshot);
   server.begin();
 }
 
 void loop() {
+  ArduinoCloud.update();
   server.handleClient();
 }
