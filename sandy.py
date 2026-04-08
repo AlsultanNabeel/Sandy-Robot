@@ -104,7 +104,10 @@ if SANDY_COMMAND_MODE not in {"cloud", "http"}:
     
 ARDUINO_CLIENT_ID = os.getenv("ARDUINO_CLIENT_ID", "").strip()
 ARDUINO_CLIENT_SECRET = os.getenv("ARDUINO_CLIENT_SECRET", "").strip()
-SANDY_DEVICE_ID = os.getenv("SANDY_DEVICE_ID", "9ae4816c-5a9e-43ae-9387-bda18f86dc61").strip()
+SANDY_DEVICE_ID = (
+    os.getenv("SANDY_DEVICE_ID", "").strip()
+    or os.getenv("SANDY_MAIN_DEVICE_ID", "").strip()
+)
 CAMERA_DEVICE_ID = os.getenv("CAMERA_DEVICE_ID", "").strip()
 ARDUINO_ORG_ID = os.getenv("ARDUINO_ORG_ID", "").strip()
 SANDY_THING_ID = os.getenv("SANDY_THING_ID", "").strip()
