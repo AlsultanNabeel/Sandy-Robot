@@ -8,25 +8,7 @@
 #include "secrets.h"
 #include "thingProperties.h"
 
-// ===== AI Thinker ESP32-CAM pins =====
-#define PWDN_GPIO_NUM     32
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM      0
-#define SIOD_GPIO_NUM     26
-#define SIOC_GPIO_NUM     27
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
-#define VSYNC_GPIO_NUM    25
-#define HREF_GPIO_NUM     23
-#define PCLK_GPIO_NUM     22
-
-WebServer server(80);
+WebServer server(CAMERA_HTTP_PORT);
 
 bool cameraInitialized = false;
 unsigned long lastStatusPrintMs = 0;
@@ -34,8 +16,8 @@ unsigned long lastStatusPrintMs = 0;
 IPAddress local_IP(CAMERA_LOCAL_IP_1, CAMERA_LOCAL_IP_2, CAMERA_LOCAL_IP_3, CAMERA_LOCAL_IP_4);
 IPAddress gateway(CAMERA_GATEWAY_1, CAMERA_GATEWAY_2, CAMERA_GATEWAY_3, CAMERA_GATEWAY_4);
 IPAddress subnet(CAMERA_SUBNET_1, CAMERA_SUBNET_2, CAMERA_SUBNET_3, CAMERA_SUBNET_4);
-IPAddress primaryDNS(8, 8, 8, 8);
-IPAddress secondaryDNS(1, 1, 1, 1);
+IPAddress primaryDNS(CAMERA_PRIMARY_DNS_1, CAMERA_PRIMARY_DNS_2, CAMERA_PRIMARY_DNS_3, CAMERA_PRIMARY_DNS_4);
+IPAddress secondaryDNS(CAMERA_SECONDARY_DNS_1, CAMERA_SECONDARY_DNS_2, CAMERA_SECONDARY_DNS_3, CAMERA_SECONDARY_DNS_4);
 
 static bool tokenOk(const char* argName, const char* expected) {
   return expected && strlen(expected) > 0 && server.hasArg(argName) && server.arg(argName) == expected;
@@ -82,7 +64,7 @@ camera_config_t buildCameraConfig() {
   cfg.pin_sccb_scl = SIOC_GPIO_NUM;
   cfg.pin_pwdn = PWDN_GPIO_NUM;
   cfg.pin_reset = RESET_GPIO_NUM;
-  cfg.xclk_freq_hz = 20000000;
+  cfg.xclk_freq_hz = CAMERA_XCLK_FREQ_HZ;
   cfg.pixel_format = PIXFORMAT_JPEG;
   cfg.frame_size = CAMERA_DEFAULT_FRAME_SIZE;
   cfg.jpeg_quality = CAMERA_DEFAULT_JPEG_QUALITY;
@@ -336,7 +318,7 @@ void handleControl() {
     setMode(cameraPower ? "watch" : "idle");
   } else if (action == "reboot" || action == "restart" || action == "reset") {
     sendJson("{\"ok\":true,\"action\":\"" + action + "\",\"status\":" + buildStatusJson() + "}");
-    delay(300);
+    delay(CAMERA_REBOOT_RESPONSE_DELAY_MS);
     ESP.restart();
     return;
   } else if (action == "auth_ok") {
@@ -364,7 +346,7 @@ void connectWiFi() {
   WiFi.begin(SECRET_SSID, SECRET_OPTIONAL_PASS);
   Serial.print("Connecting to WiFi");
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
+    delay(CAMERA_WIFI_POLL_DELAY_MS);
     Serial.print(".");
   }
   Serial.println();
@@ -458,8 +440,8 @@ void onFullModeEnabledChange() {
 }
 
 void setup() {
-  Serial.begin(115200);
-  delay(500);
+  Serial.begin(CAMERA_SERIAL_BAUD);
+  delay(CAMERA_BOOT_DELAY_MS);
 
   pinMode(PWDN_GPIO_NUM, OUTPUT);
   digitalWrite(PWDN_GPIO_NUM, HIGH);
@@ -476,7 +458,7 @@ void setup() {
 
   initProperties();
   ArduinoCloud.begin(ArduinoIoTPreferredConnection); // هو سيتكفل بالواي فاي والكلاود
-  setDebugMessageLevel(3);
+  setDebugMessageLevel(CAMERA_DEBUG_LEVEL);
   if (cameraPower) applyPowerState(true);
   else stopCameraHardware();
 
@@ -489,7 +471,7 @@ void loop() {
   ArduinoCloud.update();
   server.handleClient();
 
-  if (millis() - lastStatusPrintMs >= 15000) {
+  if (millis() - lastStatusPrintMs >= CAMERA_STATUS_PRINT_INTERVAL_MS) {
     lastStatusPrintMs = millis();
     Serial.println(buildStatusJson());
   }

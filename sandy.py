@@ -3213,6 +3213,29 @@ def enqueue_user_request(text: str, chat_id: int, send_voice: bool = True) -> st
     return "ماشي، استلمت طلبك وبلشت التنفيذ الآن."
 
 
+def _should_enqueue_as_command(text: str) -> bool:
+    content = str(text or "").strip()
+    if not content:
+        return False
+
+    low = content.lower()
+    greeting_only = {
+        "مرحبا", "اهلا", "أهلا", "هلا", "هاي", "hello", "hi", "hey",
+        "كيفك", "شلونك", "صباح الخير", "مساء الخير",
+    }
+    if low in greeting_only:
+        return False
+
+    intent, conf = _classify_user_intent_ai(content)
+    if intent == "command" and conf >= 0.5:
+        return True
+    if intent == "mixed" and conf >= 0.6:
+        return True
+
+    # Fallback: explicit action cues are treated as executable commands.
+    return _has_action_command_cue(content)
+
+
 if bot:
     @bot.message_handler(commands=["start"])
     def tg_start(message):
@@ -3252,8 +3275,13 @@ if bot:
             with sr.AudioFile(str(wav_path)) as source:
                 audio = recognizer.record(source)
             text = recognizer.recognize_google(audio, language="ar")
-            status = enqueue_user_request(text, chat_id=message.chat.id, send_voice=True)
-            bot.send_message(message.chat.id, status)
+            if _should_enqueue_as_command(text):
+                status = enqueue_user_request(text, chat_id=message.chat.id, send_voice=True)
+                bot.send_message(message.chat.id, status)
+            else:
+                reply = handle_user_text(text, chat_id=message.chat.id, speak_reply=False)
+                bot.send_message(message.chat.id, reply)
+                speak(reply, chat_id=message.chat.id, send_voice=True)
         except Exception as e:
             bot.send_message(message.chat.id, f"ما قدرت أفهم الفويس: {e}")
 
@@ -3261,8 +3289,13 @@ if bot:
 def tg_text(message):
     if not should_handle_chat(message.chat.id):
         return
-    status = enqueue_user_request(message.text, chat_id=message.chat.id, send_voice=True)
-    bot.send_message(message.chat.id, status)
+    if _should_enqueue_as_command(message.text):
+        status = enqueue_user_request(message.text, chat_id=message.chat.id, send_voice=True)
+        bot.send_message(message.chat.id, status)
+    else:
+        reply = handle_user_text(message.text, chat_id=message.chat.id, speak_reply=False)
+        bot.send_message(message.chat.id, reply)
+        speak(reply, chat_id=message.chat.id, send_voice=True)
 
 # =========================
 # Main interaction
