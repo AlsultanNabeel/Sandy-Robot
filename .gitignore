@@ -1,20 +1,40 @@
-# حساسات وأسرار محلية — لا ترفعها للمستودع
-config.h
+# أسرار وملفات محلية
 .env
 .env.*
 !.env.example
-sandy/secrets.h
-esp32cam_stream/secrets.h
-sandy_config.py
+local.settings.json
+sandy_camera_config.json
 
-# ملفات مؤقتة للنظام أو البايثون
+sandy/secrets.h
+esp32cam_Camera/secrets.h
+sandy_config.py
+sandy.py.bak
+لكي لا ننسى.txt
+
+# كاش ومخلفات النظام
 __pycache__/
 *.pyc
 .DS_Store
+__MACOSX/
 
-# مخلفات التشغيل
+# مخلفات تشغيل
 *.mp3
-sandy_memory.json
+*.wav
+*.ogg
+*.aifc
 Screenshot*
+telegram_voice.*
+
+# قواعد بيانات وذاكرة محلية
 faces/
-faces/
+sandy_memory_db/
+sandy_memory.json
+sandy_session_memory.json
+sandy_topics_fallback.json
+sandy_raw_fallback.json
+daily_plan.json
+reminders.json
+.python_packages
+.venv
+wake_word_training/
+wake_word_model.pkl

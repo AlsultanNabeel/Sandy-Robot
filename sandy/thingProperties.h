@@ -3,17 +3,21 @@
 #include <ArduinoIoTCloud.h>
 #include <Arduino_ConnectionHandler.h>
 
-const char DEVICE_LOGIN_NAME[]  = "9ae4816c-5a9e-43ae-9387-bda18f86dc61";
+const char DEVICE_LOGIN_NAME[]  = SANDY_DEVICE_LOGIN_NAME;
 
 const char* SSID = WIFI_SSID;
 const char* PASS = WIFI_PASSWORD;
-const char* DEVICE_KEY = "KfR#67T3vcHJ0NqtiKePT#@6A";
+const char* DEVICE_KEY = SANDY_DEVICE_KEY;
 
+// تعريف دوال الـ Callbacks
+void onBaseActionChange();
 void onBuzzerCommandChange();
 void onMoodStateChange();
 void onServoAngleChange();
 void onAutonomousModeChange();
 
+// تعريف المتغيرات السحابية
+String baseAction; // متغير الحركة الأرضية
 String buzzerCommand;
 String moodState;
 String statusText;
@@ -25,14 +29,16 @@ void initProperties(){
 
   ArduinoCloud.setBoardId(DEVICE_LOGIN_NAME);
   ArduinoCloud.setSecretDeviceKey(DEVICE_KEY);
+  
+  // ربط المتغيرات بالصلاحيات ودوال الـ Callbacks
+  ArduinoCloud.addProperty(baseAction, READWRITE, ON_CHANGE, onBaseActionChange);
   ArduinoCloud.addProperty(buzzerCommand, READWRITE, ON_CHANGE, onBuzzerCommandChange);
   ArduinoCloud.addProperty(moodState, READWRITE, ON_CHANGE, onMoodStateChange);
   ArduinoCloud.addProperty(statusText, READ, ON_CHANGE, NULL);
-  ArduinoCloud.addProperty(distanceCm, READ, 0 * SECONDS, NULL);
+  ArduinoCloud.addProperty(distanceCm, READ, 0 * SECONDS, NULL); // قراءة فقط
   ArduinoCloud.addProperty(servoAngle, READWRITE, ON_CHANGE, onServoAngleChange);
   ArduinoCloud.addProperty(autonomousMode, READWRITE, ON_CHANGE, onAutonomousModeChange);
 
 }
 
 WiFiConnectionHandler ArduinoIoTPreferredConnection(SSID, PASS);
-

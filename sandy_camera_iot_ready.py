@@ -1,17 +1,16 @@
 import cv2
 import face_recognition
-import json
 import numpy as np
 import os
 import pickle
 import time
+import threading
 from collections import deque
 import requests
 from requests.auth import HTTPBasicAuth
 
-CONFIG_PATH = "sandy_camera_config.json"
 _DEFAULT_CONFIG = {
-    "cam_ip": "192.168.8.150",
+    "cam_ip": "192.168.1.150",
     "faces_db": "faces/faces_db.pkl",
     "snapshot_token": "",
     "control_token": "",
@@ -22,6 +21,7 @@ _DEFAULT_CONFIG = {
     "face_cache_ttl_sec": 1.5,
     "reconnect_delay_sec": 2,
     "capture_retry_count": 2,
+    "eye_auto_close_sec": 20,
     "recent_faces_limit": 10,
     "stream_timeout_sec": 10,
     "control_timeout_sec": 5,
@@ -39,18 +39,21 @@ _DEFAULT_CONFIG = {
     "owner_names": ["Nabeel"]
 }
 
+_eye_close_timer = None
+_camera_state_lock = threading.Lock()
+_camera_power_on = False
+_full_mode_enabled = False
+
 
 def _load_camera_config():
-    config = dict(_DEFAULT_CONFIG)
-    if os.path.exists(CONFIG_PATH):
-        try:
-            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    config.update(data)
-        except Exception as exc:
-            print(f"⚠️ Failed to read {CONFIG_PATH}: {exc}")
-    return config
+    return dict(_DEFAULT_CONFIG)
+
+
+def _parse_owner_names(value: str | None) -> list[str]:
+    if not value:
+        return ["Nabeel"]
+    names = [name.strip() for name in value.split(",") if name.strip()]
+    return names or ["Nabeel"]
 
 
 def reload_camera_config():
@@ -60,23 +63,25 @@ def reload_camera_config():
     global RECENT_FACES_LIMIT, STREAM_TIMEOUT_SEC, CONTROL_TIMEOUT_SEC, FRAME_SCALE, MIN_FRAME_BYTES
     global LIVENESS_FRAMES, LIVENESS_MIN_DELTA, LIVENESS_INTERVAL_SEC, CASCADE_SCALE, CASCADE_NEIGHBORS
     global CASCADE_MIN_SIZE, HOG_UPSAMPLE, CLAHE_CLIP_LIMIT, CLAHE_TILE_GRID, OWNER_NAMES, _clahe, _recent_faces
+    global EYE_AUTO_CLOSE_SEC
 
     _CAMERA_CONFIG = _load_camera_config()
-    CAM_IP = _CAMERA_CONFIG.get("cam_ip", _DEFAULT_CONFIG["cam_ip"])
+    CAM_IP = os.getenv("CAM_IP", "").strip() or _CAMERA_CONFIG.get("cam_ip", _DEFAULT_CONFIG["cam_ip"])
     CAM_SNAPSHOT_URL = f"http://{CAM_IP}/snapshot"
     CAM_STREAM_URL = f"http://{CAM_IP}/stream"
     CAM_CONTROL_URL = f"http://{CAM_IP}/control"
     CAM_STATUS_URL = f"http://{CAM_IP}/status"
-    SNAPSHOT_TOKEN = _CAMERA_CONFIG.get("snapshot_token", "")
-    CONTROL_TOKEN = _CAMERA_CONFIG.get("control_token", "")
-    HTTP_USER = _CAMERA_CONFIG.get("http_user", _DEFAULT_CONFIG["http_user"])
-    HTTP_PASS = _CAMERA_CONFIG.get("http_pass", _DEFAULT_CONFIG["http_pass"])
-    SECRET_PASSPHRASE = _CAMERA_CONFIG.get("secret_passphrase", _DEFAULT_CONFIG["secret_passphrase"])
-    FACES_DB = _CAMERA_CONFIG.get("faces_db", _DEFAULT_CONFIG["faces_db"])
+    SNAPSHOT_TOKEN = os.getenv("CAM_SNAPSHOT_TOKEN", "").strip() or _CAMERA_CONFIG.get("snapshot_token", "")
+    CONTROL_TOKEN = os.getenv("CAM_CONTROL_TOKEN", "").strip() or _CAMERA_CONFIG.get("control_token", "")
+    HTTP_USER = os.getenv("CAM_HTTP_USER", "").strip() or _CAMERA_CONFIG.get("http_user", _DEFAULT_CONFIG["http_user"])
+    HTTP_PASS = os.getenv("CAM_HTTP_PASS", "").strip() or _CAMERA_CONFIG.get("http_pass", _DEFAULT_CONFIG["http_pass"])
+    SECRET_PASSPHRASE = os.getenv("CAM_SECRET_PASSPHRASE", "").strip() or _CAMERA_CONFIG.get("secret_passphrase", _DEFAULT_CONFIG["secret_passphrase"])
+    FACES_DB = os.getenv("CAM_FACES_DB", "").strip() or _CAMERA_CONFIG.get("faces_db", _DEFAULT_CONFIG["faces_db"])
     FACE_MATCH_THRESHOLD = float(_CAMERA_CONFIG.get("face_match_threshold", 0.5))
     FACE_CACHE_TTL_SEC = float(_CAMERA_CONFIG.get("face_cache_ttl_sec", 1.5))
     RECONNECT_DELAY_SEC = float(_CAMERA_CONFIG.get("reconnect_delay_sec", 2))
     CAPTURE_RETRY_COUNT = int(_CAMERA_CONFIG.get("capture_retry_count", 2))
+    EYE_AUTO_CLOSE_SEC = max(5, int(_CAMERA_CONFIG.get("eye_auto_close_sec", 20)))
     RECENT_FACES_LIMIT = int(_CAMERA_CONFIG.get("recent_faces_limit", 10))
     STREAM_TIMEOUT_SEC = int(_CAMERA_CONFIG.get("stream_timeout_sec", 10))
     CONTROL_TIMEOUT_SEC = int(_CAMERA_CONFIG.get("control_timeout_sec", 5))
@@ -91,9 +96,37 @@ def reload_camera_config():
     HOG_UPSAMPLE = int(_CAMERA_CONFIG.get("hog_upsample", 0))
     CLAHE_CLIP_LIMIT = float(_CAMERA_CONFIG.get("clahe_clip_limit", 2.0))
     CLAHE_TILE_GRID = max(2, int(_CAMERA_CONFIG.get("clahe_tile_grid", 8)))
-    OWNER_NAMES = set(_CAMERA_CONFIG.get("owner_names", ["Nabeel"]))
+    OWNER_NAMES = set(_parse_owner_names(os.getenv("CAM_OWNER_NAMES")) or _CAMERA_CONFIG.get("owner_names", ["Nabeel"]))
     _clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=(CLAHE_TILE_GRID, CLAHE_TILE_GRID))
     _recent_faces = deque(maxlen=RECENT_FACES_LIMIT)
+
+
+def _cancel_eye_close_timer():
+    global _eye_close_timer
+    with _camera_state_lock:
+        if _eye_close_timer is not None:
+            _eye_close_timer.cancel()
+            _eye_close_timer = None
+
+
+def _schedule_eye_close_timer(delay_sec: int | None = None):
+    global _eye_close_timer
+    _cancel_eye_close_timer()
+    delay = int(delay_sec or EYE_AUTO_CLOSE_SEC)
+    if delay <= 0:
+        return
+
+    def _close_if_idle():
+        try:
+            if not _full_mode_enabled:
+                camera_off()
+        finally:
+            _cancel_eye_close_timer()
+
+    with _camera_state_lock:
+        _eye_close_timer = threading.Timer(delay, _close_if_idle)
+        _eye_close_timer.daemon = True
+        _eye_close_timer.start()
 
 
 reload_camera_config()
@@ -179,10 +212,14 @@ def get_remote_status():
 
 
 def camera_on():
+    global _camera_power_on
     _set_status("waking")
     try:
         _control("wake")
         _set_status("ready")
+        _camera_power_on = True
+        if not _full_mode_enabled:
+            _schedule_eye_close_timer()
         return True
     except Exception as exc:
         _set_status("error")
@@ -191,9 +228,12 @@ def camera_on():
 
 
 def camera_off():
+    global _camera_power_on
     try:
         _control("sleep")
     finally:
+        _cancel_eye_close_timer()
+        _camera_power_on = False
         _set_status("idle")
 
 
@@ -205,12 +245,25 @@ def disarm_secret_mode():
     return _control("disarm_secret")
 
 
+def reboot_camera():
+    return _control("reboot")
+
+
 def enable_full_mode():
-    return _control("full_mode_on")
+    global _full_mode_enabled
+    result = _control("full_mode_on")
+    _full_mode_enabled = True
+    _cancel_eye_close_timer()
+    return result
 
 
 def disable_full_mode():
-    return _control("full_mode_off")
+    global _full_mode_enabled
+    result = _control("full_mode_off")
+    _full_mode_enabled = False
+    if _camera_power_on:
+        _schedule_eye_close_timer()
+    return result
 
 
 def report_auth_ok():
@@ -333,7 +386,7 @@ def capture_snapshot(speak_func=None, auto_wake=True, auto_sleep=False):
                 if attempt < CAPTURE_RETRY_COUNT - 1:
                     time.sleep(RECONNECT_DELAY_SEC)
         if captured is None:
-            if auto_sleep:
+            if auto_sleep or not _full_mode_enabled:
                 camera_off()
             return None
         frames.append(captured)
@@ -356,6 +409,8 @@ def capture_snapshot(speak_func=None, auto_wake=True, auto_sleep=False):
     _set_status("ready")
     if auto_sleep:
         camera_off()
+    elif not _full_mode_enabled:
+        _schedule_eye_close_timer()
     return name
 
 
@@ -373,9 +428,50 @@ def verify_owner(speak_func=None):
         pass
     return False, name or "unknown"
 
+def learn_new_face(new_name: str):
+    _ensure_faces_loaded()
+    if not camera_on():
+        return False, "لم أتمكن من الاتصال بالكاميرا."
+
+    _set_status("capturing")
+    frames = []
+    for _ in range(4): # نحاول التقاط 4 صور متتالية لضمان إيجاد الوجه
+        try:
+            f = _fetch_frame()
+            if f is not None:
+                frames.append(f)
+        except Exception:
+            pass
+        time.sleep(0.3)
+    
+    camera_off()
+
+    for frame in frames:
+        prepped = _enhance_frame(frame)
+        rgb = cv2.cvtColor(prepped, cv2.COLOR_BGR2RGB)
+        face_locations = face_recognition.face_locations(rgb, model="hog")
+        if face_locations:
+            encs = face_recognition.face_encodings(rgb, known_face_locations=face_locations)
+            if encs:
+                global known_encodings, known_names
+                known_encodings.append(encs[0])
+                known_names.append(new_name)
+                
+                os.makedirs(os.path.dirname(FACES_DB), exist_ok=True)
+                with open(FACES_DB, "wb") as f:
+                    pickle.dump({"encodings": known_encodings, "names": known_names}, f)
+                
+                return True, f"تم حفظ الوجه بنجاح باسم {new_name}."
+
+    return False, "لم أتمكن من رؤية وجه واضح، حاول الوقوف أمام الكاميرا في إضاءة جيدة."
+
+
 
 def open_eyes():
-    return camera_on()
+    ok = camera_on()
+    if ok and not _full_mode_enabled:
+        _schedule_eye_close_timer()
+    return ok
 
 
 def close_eyes():
@@ -384,7 +480,7 @@ def close_eyes():
 
 
 def look_ahead(speak_func=None):
-    return capture_snapshot(speak_func=speak_func, auto_wake=True, auto_sleep=True)
+    return capture_snapshot(speak_func=speak_func, auto_wake=True, auto_sleep=False)
 
 
 def handle_secret_phrase(spoken_text, speak_func=None):

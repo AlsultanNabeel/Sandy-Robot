@@ -334,6 +334,11 @@ void handleControl() {
     fullModeEnabled = false;
     cameraStream = false;
     setMode(cameraPower ? "watch" : "idle");
+  } else if (action == "reboot" || action == "restart" || action == "reset") {
+    sendJson("{\"ok\":true,\"action\":\"" + action + "\",\"status\":" + buildStatusJson() + "}");
+    delay(300);
+    ESP.restart();
+    return;
   } else if (action == "auth_ok") {
     cameraStatus = "owner_verified";
   } else if (action == "auth_fail") {
@@ -467,11 +472,11 @@ void setup() {
   secretArmed = false;
   fullModeEnabled = false;
 
-  connectWiFi();
-  initProperties();
-  ArduinoCloud.begin(ArduinoIoTPreferredConnection);
-  setDebugMessageLevel(0);
+  configureNetwork(); // نضبط الـ IP الثابت فقط بدون WiFi.begin
 
+  initProperties();
+  ArduinoCloud.begin(ArduinoIoTPreferredConnection); // هو سيتكفل بالواي فاي والكلاود
+  setDebugMessageLevel(3);
   if (cameraPower) applyPowerState(true);
   else stopCameraHardware();
 
