@@ -10,6 +10,8 @@ esp32cam_Camera/secrets.h
 sandy_config.py
 sandy.py.bak
 لكي لا ننسى.txt
+esp32cam_Camera/esp32cam_Camera.txt
+sandy/sandy.ino.txt
 
 # كاش ومخلفات النظام
 __pycache__/
