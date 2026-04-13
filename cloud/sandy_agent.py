@@ -38,6 +38,15 @@ try:
 except:
     pass
 
+# Data directories
+DATA_DIR = BASE_DIR.parent / "data"
+MEMORY_DIR = DATA_DIR / "memory"
+TASKS_DIR = DATA_DIR / "tasks"
+
+# Create directories if they don't exist
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+TASKS_DIR.mkdir(parents=True, exist_ok=True)
+
 # OpenAI Configuration (read from environment variables)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
@@ -60,9 +69,11 @@ except Exception:
     SANDY_PERSONALITY = ""
     SYSTEM_PROMPT_ADDITION = ""
 
-# Memory Configuration
-MEMORY_FILE = BASE_DIR / "sandy_agent_memory.json"
-SESSION_FILE = BASE_DIR / "sandy_session_memory.json"
+# Memory Configuration (updated paths)
+MEMORY_FILE = MEMORY_DIR / "sandy_agent_memory.json"
+SESSION_FILE = MEMORY_DIR / "sandy_session_memory.json"
+TASKS_FILE = TASKS_DIR / "daily_plan.json"
+REMINDERS_FILE = TASKS_DIR / "reminders.json"
 
 # ═══════════════════════════════════════════════════════════
 # INITIALIZATION
@@ -242,6 +253,119 @@ def generate_learning_questions(user_message: str, memory: Dict[str, Any]) -> Op
         questions.append("واااو! 😍 تحب هالشي؟ ممكن تقول لي أكتر عن اهتماماتك؟")
     
     return questions[0] if questions else None
+
+# ═══════════════════════════════════════════════════════════
+# TASKS & REMINDERS MANAGEMENT
+# ═══════════════════════════════════════════════════════════
+
+def load_tasks() -> List[Dict[str, Any]]:
+    """Load tasks from disk"""
+    if TASKS_FILE.exists():
+        try:
+            with open(TASKS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[Tasks] Error loading tasks: {e}")
+    return []
+
+def save_tasks(tasks: List[Dict[str, Any]]):
+    """Save tasks to disk"""
+    try:
+        with open(TASKS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(tasks, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[Tasks] Error saving tasks: {e}")
+
+def load_reminders() -> List[Dict[str, Any]]:
+    """Load reminders from disk"""
+    if REMINDERS_FILE.exists():
+        try:
+            with open(REMINDERS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return []
+
+def save_reminders(reminders: List[Dict[str, Any]]):
+    """Save reminders to disk"""
+    try:
+        with open(REMINDERS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(reminders, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[Reminders] Error saving reminders: {e}")
+
+def add_task(task_text: str) -> str:
+    """Add a new task"""
+    tasks = load_tasks()
+    task = {
+        "id": str(datetime.now().timestamp()),
+        "text": task_text,
+        "done": False,
+        "created_at": datetime.now().isoformat(),
+        "completed_at": None
+    }
+    tasks.append(task)
+    save_tasks(tasks)
+    print(f"[Tasks] ✅ مهمة جديدة: {task_text}")
+    return task["id"]
+
+def complete_task(task_id: str) -> bool:
+    """Mark task as complete"""
+    tasks = load_tasks()
+    for task in tasks:
+        if task["id"] == task_id:
+            task["done"] = True
+            task["completed_at"] = datetime.now().isoformat()
+            save_tasks(tasks)
+            print(f"[Tasks] ✅ تم إكمال: {task['text']}")
+            return True
+    return False
+
+def list_tasks() -> str:
+    """Get list of all tasks"""
+    tasks = load_tasks()
+    active_tasks = [t for t in tasks if not t["done"]]
+    
+    if not active_tasks:
+        return "✅ ما في مهام معلقة! أنت متفرغ! 🎉"
+    
+    task_list = "📋 المهام المعلقة:\n"
+    for i, task in enumerate(active_tasks, 1):
+        task_list += f"{i}. {task['text']}\n"
+    return task_list
+
+def add_reminder(text: str, remind_at: str = None) -> str:
+    """Add a new reminder"""
+    reminders = load_reminders()
+    reminder = {
+        "id": str(datetime.now().timestamp()),
+        "text": text,
+        "created_at": datetime.now().isoformat(),
+        "remind_at": remind_at
+    }
+    reminders.append(reminder)
+    save_reminders(reminders)
+    print(f"[Reminders] 🔔 تذكير جديد: {text}")
+    return reminder["id"]
+
+def check_reminders() -> Optional[str]:
+    """Check if any reminders need to be sent"""
+    reminders = load_reminders()
+    now = datetime.now()
+    
+    pending = []
+    for reminder in reminders:
+        if reminder["remind_at"]:
+            remind_time = datetime.fromisoformat(reminder["remind_at"])
+            if remind_time <= now:
+                pending.append(reminder)
+    
+    if pending:
+        message = "🔔 التذكيرات:\n"
+        for r in pending:
+            message += f"• {r['text']}\n"
+        return message
+    return None
 
 # ═══════════════════════════════════════════════════════════
 # SANDY AGENT LOGIC
@@ -438,6 +562,28 @@ class SandyAgent:
         }
         self.memory['reminders'].append(reminder)
         save_memory(self.memory)
+    
+    # ⭐️ NEW: Task and Reminder Methods
+    
+    def create_task(self, task_text: str) -> str:
+        """Create a new task"""
+        return add_task(task_text)
+    
+    def finish_task(self, task_id: str) -> bool:
+        """Mark task as done"""
+        return complete_task(task_id)
+    
+    def show_tasks(self) -> str:
+        """Show all pending tasks"""
+        return list_tasks()
+    
+    def create_reminder(self, text: str, remind_at: str = None) -> str:
+        """Create a new reminder"""
+        return add_reminder(text, remind_at)
+    
+    def show_pending_reminders(self) -> Optional[str]:
+        """Check and show pending reminders"""
+        return check_reminders()
 
 # ═══════════════════════════════════════════════════════════
 # TELEGRAM BOT HANDLERS
