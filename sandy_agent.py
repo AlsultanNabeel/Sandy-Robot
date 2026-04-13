@@ -37,6 +37,12 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 SANDY_USER_CHAT_ID = os.getenv("SANDY_USER_CHAT_ID", "").strip()
 
+# DEBUG: Print what we're reading
+print("[DEBUG STARTUP] Environment Variables:")
+print(f"  OPENAI_API_KEY: {'SET' if OPENAI_API_KEY else 'EMPTY'} (len={len(OPENAI_API_KEY)})")
+print(f"  TELEGRAM_BOT_TOKEN: {'SET' if TELEGRAM_BOT_TOKEN else 'EMPTY'} (len={len(TELEGRAM_BOT_TOKEN)})")
+print(f"  SANDY_USER_CHAT_ID: {'SET' if SANDY_USER_CHAT_ID else 'EMPTY'} ({SANDY_USER_CHAT_ID})")
+
 # Sandy Configuration
 try:
     from sandy_config import NABEEL_INFO, SANDY_PERSONALITY, SYSTEM_PROMPT_ADDITION
@@ -54,13 +60,20 @@ SESSION_FILE = BASE_DIR / "sandy_session_memory.json"
 # ═══════════════════════════════════════════════════════════
 
 if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY missing in .env")
+    print("[WARNING] OPENAI_API_KEY missing - will fail on first request")
+    print(f"[DEBUG] OPENAI_API_KEY value: {OPENAI_API_KEY}")
+    print(f"[DEBUG] TELEGRAM_BOT_TOKEN value: {TELEGRAM_BOT_TOKEN}")
+    print(f"[DEBUG] SANDY_USER_CHAT_ID value: {SANDY_USER_CHAT_ID}")
+    # Don't raise error - let it fail gracefully
+    # raise RuntimeError("OPENAI_API_KEY missing in .env")
 
 if not TELEGRAM_BOT_TOKEN:
-    raise RuntimeError("TELEGRAM_BOT_TOKEN missing in .env")
+    print("[WARNING] TELEGRAM_BOT_TOKEN missing")
+    # raise RuntimeError("TELEGRAM_BOT_TOKEN missing in .env")
 
 if not SANDY_USER_CHAT_ID:
-    raise RuntimeError("SANDY_USER_CHAT_ID missing in .env")
+    print("[WARNING] SANDY_USER_CHAT_ID missing")
+    # raise RuntimeError("SANDY_USER_CHAT_ID missing in .env")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 telegram_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=True)
