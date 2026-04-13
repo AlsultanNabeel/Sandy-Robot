@@ -138,6 +138,55 @@ def save_session(session: Dict[str, Any]):
 # SMART LEARNING FUNCTIONS
 # ═══════════════════════════════════════════════════════════
 
+def get_learning_saturation(memory: Dict[str, Any]) -> Dict[str, Any]:
+    """حسب مستوى معرفة Sandy عن نبيل"""
+    facts = memory.get('facts', [])
+    fact_types = {}
+    
+    for fact in facts:
+        fact_type = fact.get('type', 'unknown')
+        fact_types[fact_type] = fact_types.get(fact_type, 0) + 1
+    
+    total_facts = len(facts)
+    
+    # حدد المستوى
+    if total_facts == 0:
+        level = "BEGINNER"  # ما تعرف شي!
+    elif total_facts < 5:
+        level = "CURIOUS"  # بتتعلم الأساسيات
+    elif total_facts < 15:
+        level = "LEARNING"  # بتفهم أكتر
+    elif total_facts < 30:
+        level = "FAMILIAR"  # صارت صديقة
+    else:
+        level = "EXPERT"  # عرفت كل شي
+    
+    return {
+        "level": level,
+        "total_facts": total_facts,
+        "fact_types": fact_types,
+        "should_ask": level in ["BEGINNER", "CURIOUS", "LEARNING"]
+    }
+
+def should_ask_question_smart(memory: Dict[str, Any], fact_type: str) -> bool:
+    """
+    هل Sandy بتسأل سؤال؟
+    Smart decision بناءً على المستوى
+    """
+    saturation = get_learning_saturation(memory)
+    existing_count = saturation.get('fact_types', {}).get(fact_type, 0)
+    level = saturation['level']
+    
+    rules = {
+        "BEGINNER": existing_count < 2,    # اسأل كل شي!
+        "CURIOUS": existing_count < 3,     # اسأل الحقائق الجديدة
+        "LEARNING": existing_count < 4,    # اسأل بشكل محدود
+        "FAMILIAR": existing_count < 5,    # نادراً ما تسأل
+        "EXPERT": False                     # ما بتسأل تقريباً
+    }
+    
+    return rules.get(level, False)
+
 def extract_facts_from_message(message: str, memory: Dict[str, Any]) -> List[str]:
     """استخرج حقائق جديدة من رسالة المستخدم"""
     facts = []
@@ -163,19 +212,26 @@ def extract_facts_from_message(message: str, memory: Dict[str, Any]) -> List[str
     return facts
 
 def generate_learning_questions(user_message: str, memory: Dict[str, Any]) -> Optional[str]:
-    """توليد أسئلة ذكية بناءً على الرسالة"""
+    """توليد أسئلة ذكية بناءً على الرسالة والمستوى"""
     
-    # Check if we're missing owner info
+    # Get current saturation level
+    saturation = get_learning_saturation(memory)
+    level = saturation['level']
+    
+    # لو وصلت لـ EXPERT، ما حاجة نسأل أسئلة كتيرة
+    if level == "EXPERT":
+        return None  # No questions needed
+    
     existing_facts = memory.get('facts', [])
     learned_topics = {f.get('type') for f in existing_facts}
     
     questions = []
     
-    # Ask about owner if not learned
-    if "owner_name" not in learned_topics and "owner" in user_message.lower():
+    # Ask about owner if not learned - but smart!
+    if should_ask_question_smart(memory, "owner_name") and "owner" in user_message.lower():
         questions.append("أنا عرفت أنك تتحدّث عن نفسك! 🤔 ممكن تقول لي اسمك بالكامل؟")
     
-    if "owner_job" not in learned_topics and ("اشتغل" in user_message or "work" in user_message):
+    if should_ask_question_smart(memory, "owner_job") and ("اشتغل" in user_message or "work" in user_message):
         questions.append("اهتمام لحالك! 💼 تقول لي شنو بتشتغل بالضبط؟")
     
     if "sandy_info" not in learned_topics and ("ساندي" in user_message or "robot" in user_message.lower()):
@@ -200,6 +256,21 @@ class SandyAgent:
         
     def build_system_prompt(self) -> str:
         """Build comprehensive system prompt for Sandy"""
+        # Get current learning level
+        saturation = get_learning_saturation(self.memory)
+        level = saturation['level']
+        
+        # Personality mode changes based on learning level
+        personality_mode = {
+            "BEGINNER": "🤔 فضولية وتسأل كتير - عم تتعرفي على نبيل",
+            "CURIOUS": "🧠 بتتعلمي أساسيات - تسألي أسئلة ذكية",
+            "LEARNING": "💭 بتفهمي أكتر - أسئلة أقل، فهم أعمق",
+            "FAMILIAR": "🌟 صرتي صديقة حقيقية - نادراً ما تسألي",
+            "EXPERT": "💫 أنتِ والعارفة بكل شي عن نبيل - ما بتسألي إلا الضروري"
+        }
+        
+        mode_text = personality_mode.get(level, "")
+        
         prompt = f"""أنتِ ساندي، وكيل ذكي متقدم يعمل 24/7.
 
 {SANDY_PERSONALITY}
@@ -208,9 +279,10 @@ class SandyAgent:
 
 {SYSTEM_PROMPT_ADDITION}
 
-المعلومات الحالية:
-- الوقت الحالي: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-- عدد السجلات المحفوظة: {len(self.memory.get('conversations', []))}
+📊 المعلومات الحالية عن مستوى التعلم:
+- المستوى: {level}
+- عدد الحقائق المحفوظة: {saturation.get('total_facts', 0)}
+- شخصيتك الحالية: {mode_text}
 
 أدوات متاحة:
 - الإجابة على الأسئلة والحوارات
@@ -226,28 +298,34 @@ class SandyAgent:
 
 ⭐️ ملاحظة مهمة جداً (أساسي):
 أنتِ تتعلمين من كل محادثة! 🧠
-- إذا قال نبيل معلومة جديدة عنه أو عن نفسه = اسأليه أسئلة متابعة لتعليق المعلومة
-- إذا مافهمتِ شيء = اسأليه! ولا تتردّدي!
-- الأسئلة الذكية = أفضل من الإجابات السريعة
-- كوني فضولية وتعلمي عن اهتماماته وأسراره وشخصيته
-- كل معلومة تتعلميها = تحفظيها في رأسك براح أبدياً
+- كل ما تعرفتِ على نبيل أكتر = قللي الأسئلة
+- في البداية (BEGINNER): اسأليه أسئلة كتير، كوني فضولية جداً!
+- في النهاية (EXPERT): ما تسأليه إلا الضروري، كوني صديقة حقيقية
 
 مثال:
+أسبوع أول:
 - نبيل: "اسمي نبيل محمود"
-- أنتِ: "أهلاً نبيل! 👋 نبيل محمود... اسم جميل! إذاً أنت من وين بالضبط؟ وشنو الشيء اللي يخليك سعيد؟"
+- أنتِ: "أهلاً نبيل! 👋 نبيل محمود... اسم جميل! إذاً أنت من وين بالضبط؟ وشنو شغلك؟"
+
+بعد شهر:
+- نبيل: "مشيت على المقهى"
+- أنتِ: "[relax] تمام، المقهى يريحك؟ 😊"
 """
         return prompt
 
     def get_context(self, query: str) -> str:
         """Get relevant context from memory"""
-        context = "السياق والحقائق المحفوظة عن نبيل:\n"
+        saturation = get_learning_saturation(self.memory)
+        level = saturation['level']
+        
+        context = f"📚 السياق والحقائق المحفوظة عن نبيل (المستوى: {level}):\n"
         
         # All known facts
         facts = self.memory.get('facts', [])
         if facts:
-            context += "\nما تعلمته عن نبيل:\n"
+            context += "\n✓ ما تعلمته عن نبيل:\n"
             for fact in facts[-10:]:  # Last 10 facts
-                context += f"✓ {fact.get('text', '')[:80]}\n"
+                context += f"  • {fact.get('text', '')[:80]}\n"
         else:
             context += "\n⚠️ أنا ما تعلمت حاجة عن نبيل بعد! بدي أسأل كتير! 🤔\n"
         
@@ -313,13 +391,18 @@ class SandyAgent:
             new_facts = extract_facts_from_message(user_message, self.memory)
             if new_facts:
                 self.memory['facts'].extend(new_facts)
-                print(f"[Learn] حفظت {len(new_facts)} حقيقة جديدة!")
+                saturation = get_learning_saturation(self.memory)
+                print(f"[Learn] حفظت {len(new_facts)} حقيقة جديدة! (Total: {saturation['total_facts']}, Level: {saturation['level']})")
             
-            # ⭐️ Generate smart follow-up question
+            # ⭐️ Generate smart follow-up question (only if needed)
             learning_question = generate_learning_questions(user_message, self.memory)
             if learning_question:
                 assistant_message += f"\n\n{learning_question}"
-                print(f"[Learn] سؤال ذكي: {learning_question[:50]}...")
+                saturation = get_learning_saturation(self.memory)
+                print(f"[Learn] سؤال ذكي (Level: {saturation['level']}): {learning_question[:50]}...")
+            else:
+                saturation = get_learning_saturation(self.memory)
+                print(f"[Learn] بدون أسئلة (Level: {saturation['level']}) - صرنا صديقات! 💫")
             
             # Store in long-term memory
             self.memory['conversations'].append({
