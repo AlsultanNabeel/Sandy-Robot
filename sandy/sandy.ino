@@ -6,6 +6,27 @@
 #include "secrets.h"
 #include "thingProperties.h"
 
+// ===== LEDC compatibility (works on ESP32 core 2.x and 3.x) =====
+static const int BUZZER_LEDC_CH = 0;
+static const int BUZZER_CH = 0;
+static bool buzzerLedcAttachCompat() {
+  ledcSetup(BUZZER_LEDC_CH, BUZZER_BASE_FREQ, BUZZER_RESOLUTION);
+  ledcAttachPin(BUZZER_PIN, BUZZER_LEDC_CH);
+  return true;
+}
+
+static void buzzerLedcDetachCompat() {
+  ledcDetachPin(BUZZER_PIN);
+}
+
+static void buzzerLedcWriteToneCompat(int freq) {
+  ledcWriteTone(BUZZER_LEDC_CH, freq);
+}
+
+static void buzzerLedcWriteDutyCompat(uint32_t duty) {
+  ledcWrite(BUZZER_LEDC_CH, duty);
+}
+
 
 TFT_eSPI tft = TFT_eSPI();
 Servo neckServo;
@@ -136,7 +157,7 @@ void turnRight() {
 // Utility
 // =========================
 
-const char* moodToString(Mood mood) {
+const char* moodToString(int mood) {
   switch (mood) {
     case MOOD_IDLE: return "idle";
     case MOOD_HAPPY: return "happy";
@@ -212,7 +233,8 @@ void setupBuzzer() {
     return;
   }
 
-  buzzerReady = ledcAttach(BUZZER_PIN, BUZZER_BASE_FREQ, BUZZER_RESOLUTION);
+  buzzerReady = ledcSetup(BUZZER_CH, BUZZER_BASE_FREQ, BUZZER_RESOLUTION);
+                ledcAttachPin(BUZZER_PIN, BUZZER_CH);
 
   Serial.print("BUZZER_PIN = ");
   Serial.println(BUZZER_PIN);
@@ -229,7 +251,7 @@ void stopBuzzer() {
 
   ledcWriteTone(BUZZER_PIN, 0);
   ledcWrite(BUZZER_PIN, 0);
-  ledcDetach(BUZZER_PIN);
+  ledcDetachPin(BUZZER_PIN);
 
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
@@ -241,7 +263,8 @@ void playToneMs(int freq, int dur) {
   if (!ENABLE_BUZZER) return;
 
   if (!buzzerReady) {
-    buzzerReady = ledcAttach(BUZZER_PIN, BUZZER_BASE_FREQ, BUZZER_RESOLUTION);
+    buzzerReady = ledcSetup(BUZZER_CH, BUZZER_BASE_FREQ, BUZZER_RESOLUTION);
+                  ledcAttachPin(BUZZER_PIN, BUZZER_CH);
     if (!buzzerReady) return;
   }
 
@@ -349,7 +372,7 @@ void maybeTalkTone() {
 // =========================
 // Mood -> Servo
 // =========================
-void applyMoodMotion(Mood mood) {
+void applyMoodMotion(int mood) {
   switch (mood) {
     case MOOD_IDLE:       moveNeckTo(SERVO_CENTER_ANGLE); break;
     case MOOD_CALM:       moveNeckTo(SERVO_CENTER_ANGLE - 2); break;

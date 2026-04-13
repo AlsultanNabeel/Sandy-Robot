@@ -12,6 +12,7 @@ WebServer server(CAMERA_HTTP_PORT);
 
 bool cameraInitialized = false;
 unsigned long lastStatusPrintMs = 0;
+bool serverStarted = false;
 
 IPAddress local_IP(CAMERA_LOCAL_IP_1, CAMERA_LOCAL_IP_2, CAMERA_LOCAL_IP_3, CAMERA_LOCAL_IP_4);
 IPAddress gateway(CAMERA_GATEWAY_1, CAMERA_GATEWAY_2, CAMERA_GATEWAY_3, CAMERA_GATEWAY_4);
@@ -246,7 +247,19 @@ void handleStream() {
   response += "Pragma: no-cache\r\n\r\n";
   client.print(response);
 
+  unsigned long streamStartedAt = millis();
+
   while (client.connected()) {
+    if (millis() - streamStartedAt > CAMERA_STREAM_MAX_DURATION_MS) {
+      setCameraStatus("stream_timeout");
+      break;
+    }
+
+    if (WiFi.status() != WL_CONNECTED) {
+      setCameraStatus("wifi_lost");
+      break;
+    }
+
     camera_fb_t* fb = esp_camera_fb_get();
     if (!fb) {
       setCameraStatus("stream_error");
@@ -360,7 +373,14 @@ void configureRoutes() {
   server.on("/snapshot", HTTP_GET, handleSnapshot);
   server.on("/stream", HTTP_GET, handleStream);
   server.on("/control", HTTP_GET, handleControl);
-  server.begin();
+}
+
+void startServerIfReady() {
+  if (!serverStarted && WiFi.status() == WL_CONNECTED) {
+    server.begin();
+    serverStarted = true;
+    Serial.println("[HTTP] server started");
+  }
 }
 
 void onCameraPowerChange() {
@@ -463,13 +483,17 @@ void setup() {
   else stopCameraHardware();
 
   configureRoutes();
-  setCameraStatus(cameraPower ? "ready" : "sleeping");
-  Serial.println("ESP32-CAM secure cloud controller ready.");
+setCameraStatus(cameraPower ? "ready" : "sleeping");
+Serial.println("ESP32-CAM ready.");
 }
 
 void loop() {
-  ArduinoCloud.update();
+ArduinoCloud.update();
+startServerIfReady();
+
+if (serverStarted) {
   server.handleClient();
+}
 
   if (millis() - lastStatusPrintMs >= CAMERA_STATUS_PRINT_INTERVAL_MS) {
     lastStatusPrintMs = millis();
