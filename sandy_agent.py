@@ -22,13 +22,18 @@ from apscheduler.schedulers.background import BackgroundScheduler
 # ═══════════════════════════════════════════════════════════
 
 BASE_DIR = Path(__file__).resolve().parent
-load_dotenv(BASE_DIR / ".env")
 
-# OpenAI Configuration
+# Try to load .env locally (for development)
+try:
+    load_dotenv(BASE_DIR / ".env")
+except:
+    pass
+
+# OpenAI Configuration (read from environment variables)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
 
-# Telegram Configuration
+# Telegram Configuration (read from environment variables)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 SANDY_USER_CHAT_ID = os.getenv("SANDY_USER_CHAT_ID", "").strip()
 
