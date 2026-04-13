@@ -17,6 +17,15 @@ from openai import OpenAI
 import telebot
 from apscheduler.schedulers.background import BackgroundScheduler
 
+# Try to import Chroma for smart memory
+try:
+    import chromadb
+    from chromadb.config import Settings
+    CHROMA_AVAILABLE = True
+except ImportError:
+    CHROMA_AVAILABLE = False
+    print("[Warning] Chroma DB not available, using JSON memory only")
+
 # ═══════════════════════════════════════════════════════════
 # CONFIGURATION & ENV SETUP
 # ═══════════════════════════════════════════════════════════
@@ -126,6 +135,59 @@ def save_session(session: Dict[str, Any]):
         print(f"[Session] Error saving session: {e}")
 
 # ═══════════════════════════════════════════════════════════
+# SMART LEARNING FUNCTIONS
+# ═══════════════════════════════════════════════════════════
+
+def extract_facts_from_message(message: str, memory: Dict[str, Any]) -> List[str]:
+    """استخرج حقائق جديدة من رسالة المستخدم"""
+    facts = []
+    
+    # Pattern matching for common facts
+    patterns = {
+        "سمي|اسمي|اسمي هو|أنا اسمي": "owner_name",
+        "اشتغل|وظيفتي|اشتغل في|أعمل في": "owner_job",
+        "عمري|سني|اسكن|أسكن في": "owner_info",
+        "أحب|بحب|يعجبني": "owner_preference",
+        "ساندي|اسمك|اسمي": "sandy_info"
+    }
+    
+    for pattern, fact_type in patterns.items():
+        if any(word in message for word in pattern.split("|")):
+            facts.append({
+                "type": fact_type,
+                "text": message,
+                "timestamp": datetime.now().isoformat(),
+                "learned": True
+            })
+    
+    return facts
+
+def generate_learning_questions(user_message: str, memory: Dict[str, Any]) -> Optional[str]:
+    """توليد أسئلة ذكية بناءً على الرسالة"""
+    
+    # Check if we're missing owner info
+    existing_facts = memory.get('facts', [])
+    learned_topics = {f.get('type') for f in existing_facts}
+    
+    questions = []
+    
+    # Ask about owner if not learned
+    if "owner_name" not in learned_topics and "owner" in user_message.lower():
+        questions.append("أنا عرفت أنك تتحدّث عن نفسك! 🤔 ممكن تقول لي اسمك بالكامل؟")
+    
+    if "owner_job" not in learned_topics and ("اشتغل" in user_message or "work" in user_message):
+        questions.append("اهتمام لحالك! 💼 تقول لي شنو بتشتغل بالضبط؟")
+    
+    if "sandy_info" not in learned_topics and ("ساندي" in user_message or "robot" in user_message.lower()):
+        questions.append("بديني أعرّف نفسي أحسن! 🤖 شنو بتحب تنادي عليك اسمي؟ وشنو وظيفتي عندك؟")
+    
+    # Ask about preferences
+    if "preference" not in learned_topics and "احب" in user_message or "حب" in user_message:
+        questions.append("واااو! 😍 تحب هالشي؟ ممكن تقول لي أكتر عن اهتماماتك؟")
+    
+    return questions[0] if questions else None
+
+# ═══════════════════════════════════════════════════════════
 # SANDY AGENT LOGIC
 # ═══════════════════════════════════════════════════════════
 
@@ -161,26 +223,40 @@ class SandyAgent:
 - اختصر إلا إذا طلب نبيل التفصيل
 - ابدأ برد بكلمة انجليزية واحدة توضح الحالة الشعورية بين قوسين: [happy], [think], etc.
 - كوني ودية وذكية في نفس الوقت
+
+⭐️ ملاحظة مهمة جداً (أساسي):
+أنتِ تتعلمين من كل محادثة! 🧠
+- إذا قال نبيل معلومة جديدة عنه أو عن نفسه = اسأليه أسئلة متابعة لتعليق المعلومة
+- إذا مافهمتِ شيء = اسأليه! ولا تتردّدي!
+- الأسئلة الذكية = أفضل من الإجابات السريعة
+- كوني فضولية وتعلمي عن اهتماماته وأسراره وشخصيته
+- كل معلومة تتعلميها = تحفظيها في رأسك براح أبدياً
+
+مثال:
+- نبيل: "اسمي نبيل محمود"
+- أنتِ: "أهلاً نبيل! 👋 نبيل محمود... اسم جميل! إذاً أنت من وين بالضبط؟ وشنو الشيء اللي يخليك سعيد؟"
 """
         return prompt
 
     def get_context(self, query: str) -> str:
         """Get relevant context from memory"""
-        context = "السياق المحفوظ:\n"
+        context = "السياق والحقائق المحفوظة عن نبيل:\n"
         
-        # Recent conversations
-        recent = self.memory.get('conversations', [])[-5:]
+        # All known facts
+        facts = self.memory.get('facts', [])
+        if facts:
+            context += "\nما تعلمته عن نبيل:\n"
+            for fact in facts[-10:]:  # Last 10 facts
+                context += f"✓ {fact.get('text', '')[:80]}\n"
+        else:
+            context += "\n⚠️ أنا ما تعلمت حاجة عن نبيل بعد! بدي أسأل كتير! 🤔\n"
+        
+        # Recent conversations for context
+        recent = self.memory.get('conversations', [])[-3:]
         if recent:
             context += "\nآخر محادثات:\n"
             for conv in recent:
-                context += f"- {conv.get('text', '')[:100]}\n"
-        
-        # Important facts
-        facts = self.memory.get('facts', [])[:3]
-        if facts:
-            context += "\nحقائق مهمة:\n"
-            for fact in facts:
-                context += f"- {fact}\n"
+                context += f"🗣️ نبيل: {conv.get('user', '')[:60]}...\n"
         
         return context
 
@@ -232,6 +308,18 @@ class SandyAgent:
             
             # Save memory
             save_session(self.session)
+            
+            # ⭐️ LEARNING MODE - Extract facts from user message
+            new_facts = extract_facts_from_message(user_message, self.memory)
+            if new_facts:
+                self.memory['facts'].extend(new_facts)
+                print(f"[Learn] حفظت {len(new_facts)} حقيقة جديدة!")
+            
+            # ⭐️ Generate smart follow-up question
+            learning_question = generate_learning_questions(user_message, self.memory)
+            if learning_question:
+                assistant_message += f"\n\n{learning_question}"
+                print(f"[Learn] سؤال ذكي: {learning_question[:50]}...")
             
             # Store in long-term memory
             self.memory['conversations'].append({
