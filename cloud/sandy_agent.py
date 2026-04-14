@@ -520,43 +520,60 @@ def add_reminder(text: str, remind_at: str = None) -> str:
 
 def check_reminders() -> Optional[str]:
     """Check if any reminders need to be sent and send them via Telegram"""
-    reminders = load_reminders()
-    now = datetime.now()
-    
-    pending = []
-    remaining = []
-    
-    for reminder in reminders:
-        if reminder.get("remind_at"):
-            try:
-                remind_time = datetime.fromisoformat(reminder["remind_at"])
-                # Check if time has passed (within last minute)
-                time_diff = (now - remind_time).total_seconds()
-                if 0 <= time_diff <= 60:  # Within last minute
-                    pending.append(reminder)
-                elif time_diff < 0:  # Still in future
-                    remaining.append(reminder)
-            except:
-                remaining.append(reminder)
-        else:
-            remaining.append(reminder)
-    
-    # Send pending reminders via Telegram
-    if pending:
-        for reminder in pending:
-            message_text = f"🔔 تذكير: {reminder.get('text', '')}"
-            if SANDY_USER_CHAT_ID:
-                try:
-                    telegram_bot.send_message(SANDY_USER_CHAT_ID, message_text)
-                    print(f"[Reminder] ✅ أرسلت تذكير: {reminder.get('text', '')}")
-                except Exception as e:
-                    print(f"[Reminder] ❌ خطأ بالإرسال: {e}")
+    try:
+        reminders = load_reminders()
+        now = datetime.now()
         
-        # Keep only reminders that are still in the future
-        save_reminders(remaining)
-        return f"🔔 تم إرسال {len(pending)} تذكير!"
+        print(f"[Scheduler] 🔔 Checking {len(reminders)} reminders at {now.strftime('%H:%M:%S')}")
+        
+        pending = []
+        remaining = []
+        
+        for reminder in reminders:
+            if reminder.get("remind_at"):
+                try:
+                    remind_time = datetime.fromisoformat(reminder["remind_at"])
+                    time_diff = (now - remind_time).total_seconds()
+                    
+                    print(f"[Scheduler] Reminder: '{reminder.get('text', '')[:40]}' at {remind_time.strftime('%H:%M:%S')}, diff={time_diff:.0f}s")
+                    
+                    # Check if time has passed (within last 2 minutes for reliability)
+                    if -5 <= time_diff <= 120:  # Within 2 min after scheduled time
+                        if time_diff >= 0:  # Time has passed
+                            pending.append(reminder)
+                        else:
+                            remaining.append(reminder)
+                    else:
+                        remaining.append(reminder)
+                except Exception as e:
+                    print(f"[Scheduler] ❌ Error parsing time: {e}")
+                    remaining.append(reminder)
+            else:
+                remaining.append(reminder)
+        
+        # Send pending reminders via Telegram
+        if pending:
+            print(f"[Scheduler] 📤 Found {len(pending)} pending reminders to send!")
+            for reminder in pending:
+                message_text = f"🔔 تذكير: {reminder.get('text', '')}"
+                if SANDY_USER_CHAT_ID:
+                    try:
+                        chat_id = int(SANDY_USER_CHAT_ID)  # Convert to int
+                        telegram_bot.send_message(chat_id, message_text)
+                        print(f"[Reminder] ✅ أرسلت: {message_text}")
+                    except Exception as e:
+                        print(f"[Reminder] ❌ خطأ بالإرسال: {type(e).__name__}: {e}")
+                else:
+                    print(f"[Reminder] ⚠️ SANDY_USER_CHAT_ID not set!")
+            
+            # Keep only reminders that are still in the future
+            save_reminders(remaining)
+            return f"🔔 تم إرسال {len(pending)} تذكير!"
+        
+        return None
     
-    return None
+    except Exception as e:
+        print(f"[Scheduler] ❌ Critical error: {e}")
 
 # ═══════════════════════════════════════════════════════════
 # TIME PARSING FOR REMINDERS
@@ -580,8 +597,12 @@ def parse_reminder_time(message: str) -> Optional[str]:
             # If time is in the past, set for tomorrow
             if reminder_time < now:
                 reminder_time = reminder_time + timedelta(days=1)
-            return reminder_time.isoformat()
-        except:
+            
+            iso_time = reminder_time.isoformat()
+            print(f"[Parse] ⏰ Parsed time: {iso_time} (Now: {now.isoformat()})")
+            return iso_time
+        except Exception as e:
+            print(f"[Parse] ❌ Error parsing time: {e}")
             pass
     
     # Pattern 2: "بعد X دقيقة" (after X minutes)
@@ -589,14 +610,18 @@ def parse_reminder_time(message: str) -> Optional[str]:
     if match:
         minutes = int(match.group(1))
         reminder_time = now + timedelta(minutes=minutes)
-        return reminder_time.isoformat()
+        iso_time = reminder_time.isoformat()
+        print(f"[Parse] ⏰ Parsed time (after {minutes}min): {iso_time}")
+        return iso_time
     
     # Pattern 3: "بعد X ساعة" (after X hours)
     match = re.search(r'بعد\s+(\d+)\s+ساعة', message)
     if match:
         hours = int(match.group(1))
         reminder_time = now + timedelta(hours=hours)
-        return reminder_time.isoformat()
+        iso_time = reminder_time.isoformat()
+        print(f"[Parse] ⏰ Parsed time (after {hours}hrs): {iso_time}")
+        return iso_time
     
     return None
 
