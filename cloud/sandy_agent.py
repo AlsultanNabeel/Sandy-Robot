@@ -9,6 +9,7 @@ import json
 import time
 import asyncio
 import threading
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -494,8 +495,13 @@ def list_tasks() -> str:
     return task_list
 
 def add_reminder(text: str, remind_at: str = None) -> str:
-    """Add a new reminder"""
+    """Add a new reminder with automatic time parsing"""
     reminders = load_reminders()
+    
+    # Auto-parse time if not provided
+    if not remind_at:
+        remind_at = parse_reminder_time(text)
+    
     reminder = {
         "id": str(datetime.now().timestamp()),
         "text": text,
@@ -504,26 +510,94 @@ def add_reminder(text: str, remind_at: str = None) -> str:
     }
     reminders.append(reminder)
     save_reminders(reminders)
-    print(f"[Reminders] 🔔 تذكير جديد: {text}")
+    
+    if remind_at:
+        print(f"[Reminders] 🔔 تذكير جديد: {text} بـ {remind_at}")
+    else:
+        print(f"[Reminders] 🔔 تذكير جديد: {text} (بدون وقت محدد)")
+    
     return reminder["id"]
 
 def check_reminders() -> Optional[str]:
-    """Check if any reminders need to be sent"""
+    """Check if any reminders need to be sent and send them via Telegram"""
     reminders = load_reminders()
     now = datetime.now()
     
     pending = []
-    for reminder in reminders:
-        if reminder["remind_at"]:
-            remind_time = datetime.fromisoformat(reminder["remind_at"])
-            if remind_time <= now:
-                pending.append(reminder)
+    remaining = []
     
+    for reminder in reminders:
+        if reminder.get("remind_at"):
+            try:
+                remind_time = datetime.fromisoformat(reminder["remind_at"])
+                # Check if time has passed (within last minute)
+                time_diff = (now - remind_time).total_seconds()
+                if 0 <= time_diff <= 60:  # Within last minute
+                    pending.append(reminder)
+                elif time_diff < 0:  # Still in future
+                    remaining.append(reminder)
+            except:
+                remaining.append(reminder)
+        else:
+            remaining.append(reminder)
+    
+    # Send pending reminders via Telegram
     if pending:
-        message = "🔔 التذكيرات:\n"
-        for r in pending:
-            message += f"• {r['text']}\n"
-        return message
+        for reminder in pending:
+            message_text = f"🔔 تذكير: {reminder.get('text', '')}"
+            if SANDY_USER_CHAT_ID:
+                try:
+                    telegram_bot.send_message(SANDY_USER_CHAT_ID, message_text)
+                    print(f"[Reminder] ✅ أرسلت تذكير: {reminder.get('text', '')}")
+                except Exception as e:
+                    print(f"[Reminder] ❌ خطأ بالإرسال: {e}")
+        
+        # Keep only reminders that are still in the future
+        save_reminders(remaining)
+        return f"🔔 تم إرسال {len(pending)} تذكير!"
+    
+    return None
+
+# ═══════════════════════════════════════════════════════════
+# TIME PARSING FOR REMINDERS
+# ═══════════════════════════════════════════════════════════
+
+def parse_reminder_time(message: str) -> Optional[str]:
+    """Parse time from reminder message
+    Examples:
+    - "ذكرني على 10:14 بشي" -> 10:14
+    - "ذكرني بعد 30 دقيقة" -> current_time + 30 min
+    """
+    now = datetime.now()
+    
+    # Pattern 1: "على HH:MM" (at specific time)
+    match = re.search(r'على\s+(\d{1,2}):(\d{2})', message)
+    if match:
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        try:
+            reminder_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            # If time is in the past, set for tomorrow
+            if reminder_time < now:
+                reminder_time = reminder_time + timedelta(days=1)
+            return reminder_time.isoformat()
+        except:
+            pass
+    
+    # Pattern 2: "بعد X دقيقة" (after X minutes)
+    match = re.search(r'بعد\s+(\d+)\s+دقيقة', message)
+    if match:
+        minutes = int(match.group(1))
+        reminder_time = now + timedelta(minutes=minutes)
+        return reminder_time.isoformat()
+    
+    # Pattern 3: "بعد X ساعة" (after X hours)
+    match = re.search(r'بعد\s+(\d+)\s+ساعة', message)
+    if match:
+        hours = int(match.group(1))
+        reminder_time = now + timedelta(hours=hours)
+        return reminder_time.isoformat()
+    
     return None
 
 # ═══════════════════════════════════════════════════════════
@@ -624,6 +698,19 @@ class SandyAgent:
     def think(self, user_message: str) -> str:
         """Process message through OpenAI and generate response"""
         try:
+            # ⭐️ Check if message contains reminder request
+            if "ذكرني" in user_message or "reminder" in user_message.lower():
+                remind_time = parse_reminder_time(user_message)
+                if remind_time:
+                    # Extract reminder text (remove the time part)
+                    reminder_text = re.sub(r'(على\s+\d{1,2}:\d{2}|بعد\s+\d+\s+(دقيقة|ساعة))', '', user_message)
+                    reminder_text = reminder_text.replace("ذكرني", "").strip()
+                    
+                    if reminder_text:
+                        add_reminder(reminder_text, remind_time)
+                        response = f"[happy] تمام! ✅ بذكرك على {remind_time[-8:-3]} {reminder_text}"
+                        return response
+            
             # Build the system prompt
             system_prompt = self.build_system_prompt()
             
