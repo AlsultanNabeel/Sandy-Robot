@@ -18,14 +18,14 @@ from openai import OpenAI
 import telebot
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# MongoDB Integration
+# MongoDB Integration (Optional - requires MONGODB_URI env var)
 try:
     from pymongo import MongoClient
     from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure
     MONGODB_AVAILABLE = True
 except ImportError:
     MONGODB_AVAILABLE = False
-    print("[Warning] PyMongo not available, falling back to JSON memory")
+    print("[Warning] PyMongo not available. Install with: pip install pymongo>=4.6.0")
 
 # Try to import Chroma for smart memory
 try:
@@ -605,10 +605,10 @@ def parse_reminder_time(message: str) -> Optional[str]:
             print(f"[Parse] ❌ Error parsing time: {e}")
             pass
     
-    # Pattern 2: "بعد X دقيقة" (after X minutes)
-    match = re.search(r'بعد\s+(\d+)\s+دقيقة', message)
+    # Pattern 2: "بعد X دقيقة" or "كمان X دقيقة" (after X minutes)
+    match = re.search(r'(بعد|كمان)\s+(\d+)\s+دقيقة', message)
     if match:
-        minutes = int(match.group(1))
+        minutes = int(match.group(2))
         reminder_time = now + timedelta(minutes=minutes)
         iso_time = reminder_time.isoformat()
         print(f"[Parse] ⏰ Parsed time (after {minutes}min): {iso_time}")
