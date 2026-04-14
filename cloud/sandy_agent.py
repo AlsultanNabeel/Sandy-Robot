@@ -930,22 +930,6 @@ def daily_briefing():
     except Exception as e:
         print(f"[Briefing] Error: {e}")
 
-def check_reminders():
-    """Check and send reminders"""
-    try:
-        now = datetime.now()
-        reminders = agent.memory.get('reminders', [])
-        
-        for reminder in reminders:
-            remind_at = reminder.get('remind_at')
-            if remind_at and remind_at == now.strftime('%H:%M'):
-                telegram_bot.send_message(
-                    SANDY_USER_CHAT_ID, 
-                    f"[alert] تذكير: {reminder.get('text')}"
-                )
-    except Exception as e:
-        print(f"[Reminders] Error: {e}")
-
 # Schedule tasks
 scheduler.add_job(daily_briefing, 'cron', hour=9, minute=0)
 scheduler.add_job(check_reminders, 'interval', minutes=1)
