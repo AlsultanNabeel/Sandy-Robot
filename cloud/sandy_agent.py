@@ -75,7 +75,17 @@ mongo_db = None
 
 if MONGODB_AVAILABLE and MONGODB_URI:
     try:
-        mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+        # Enhanced MongoDB connection with proper SSL/TLS settings
+        mongo_client = MongoClient(
+            MONGODB_URI,
+            serverSelectionTimeoutMS=15000,
+            connectTimeoutMS=15000,
+            socketTimeoutMS=15000,
+            ssl=True,
+            retryWrites=True,
+            maxPoolSize=10,
+            minPoolSize=1
+        )
         # Test connection
         mongo_client.admin.command('ping')
         mongo_db = mongo_client[MONGODB_DB_NAME]
