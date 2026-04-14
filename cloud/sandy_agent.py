@@ -178,8 +178,25 @@ scheduler.start()
 # MEMORY MANAGEMENT (MongoDB + JSON Fallback)
 # ═══════════════════════════════════════════════════════════
 
+def _read_json_file(path: Path, default: Any) -> Any:
+    """Read JSON file safely and return default on any failure."""
+    if not path.exists():
+        return default
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[JSON] Error reading {path.name}: {e}")
+        return default
+
 def load_memory() -> Dict[str, Any]:
     """Load persistent memory from MongoDB or disk"""
+    default_memory = {
+        "conversations": [],
+        "facts": [],
+        "reminders": [],
+        "tasks": []
+    }
     
     # Try MongoDB first
     if mongo_db is not None:
@@ -189,25 +206,31 @@ def load_memory() -> Dict[str, Any]:
                 memory_doc.pop("_id", None)  # Remove MongoDB ID
                 print("[Memory] ✅ Loaded from MongoDB")
                 return memory_doc
+
+            # One-time migration path: seed Mongo from JSON if available.
+            json_memory = _read_json_file(MEMORY_FILE, None)
+            if isinstance(json_memory, dict):
+                mongo_db['memory'].replace_one(
+                    {"_id": "sandy_memory"},
+                    {**json_memory, "_id": "sandy_memory"},
+                    upsert=True
+                )
+                print("[Memory] 🔁 Migrated JSON -> MongoDB")
+                return json_memory
+
+            print("[Memory] ✅ MongoDB is source of truth (new memory)")
+            return default_memory
         except Exception as e:
             print(f"[Memory] ⚠️ MongoDB error: {e}, falling back to JSON")
     
     # Fallback to JSON file
-    if MEMORY_FILE.exists():
-        try:
-            with open(MEMORY_FILE, 'r', encoding='utf-8') as f:
-                print("[Memory] 📄 Loaded from JSON file")
-                return json.load(f)
-        except Exception as e:
-            print(f"[Memory] Error loading memory: {e}")
+    memory_json = _read_json_file(MEMORY_FILE, None)
+    if isinstance(memory_json, dict):
+        print("[Memory] 📄 Loaded from JSON file")
+        return memory_json
     
     # Return default structure
-    return {
-        "conversations": [],
-        "facts": [],
-        "reminders": [],
-        "tasks": []
-    }
+    return default_memory
 
 def save_memory(memory: Dict[str, Any]):
     """Save memory to MongoDB or disk"""
@@ -236,6 +259,7 @@ def save_memory(memory: Dict[str, Any]):
 
 def load_session() -> Dict[str, Any]:
     """Load current session memory from MongoDB or disk"""
+    default_session = {"messages": []}
     
     # Try MongoDB first
     if mongo_db is not None:
@@ -245,19 +269,29 @@ def load_session() -> Dict[str, Any]:
                 session_doc.pop("_id", None)
                 print("[Session] ✅ Loaded from MongoDB")
                 return session_doc
+
+            json_session = _read_json_file(SESSION_FILE, None)
+            if isinstance(json_session, dict):
+                mongo_db['sessions'].replace_one(
+                    {"_id": "current_session"},
+                    {**json_session, "_id": "current_session"},
+                    upsert=True
+                )
+                print("[Session] 🔁 Migrated JSON -> MongoDB")
+                return json_session
+
+            print("[Session] ✅ MongoDB is source of truth (new session)")
+            return default_session
         except Exception as e:
             print(f"[Session] ⚠️ MongoDB error: {e}")
     
     # Fallback to JSON file
-    if SESSION_FILE.exists():
-        try:
-            with open(SESSION_FILE, 'r', encoding='utf-8') as f:
-                print("[Session] 📄 Loaded from JSON file")
-                return json.load(f)
-        except Exception:
-            pass
+    session_json = _read_json_file(SESSION_FILE, None)
+    if isinstance(session_json, dict):
+        print("[Session] 📄 Loaded from JSON file")
+        return session_json
     
-    return {"messages": []}
+    return default_session
 
 def save_session(session: Dict[str, Any]):
     """Save session memory to MongoDB or disk"""
@@ -409,17 +443,27 @@ def load_tasks() -> List[Dict[str, Any]]:
             if tasks:
                 print("[Tasks] ✅ Loaded from MongoDB")
                 return tasks
+
+            json_tasks = _read_json_file(TASKS_FILE, [])
+            if isinstance(json_tasks, list) and json_tasks:
+                mongo_db['tasks'].delete_many({"type": "task"})
+                for task in json_tasks:
+                    task["type"] = "task"
+                    mongo_db['tasks'].insert_one(task)
+                    task.pop("type", None)
+                print("[Tasks] 🔁 Migrated JSON -> MongoDB")
+                return json_tasks
+
+            print("[Tasks] ✅ MongoDB is source of truth (0 tasks)")
+            return []
         except Exception as e:
             print(f"[Tasks] ⚠️ MongoDB error: {e}")
     
     # Fallback to JSON file
-    if TASKS_FILE.exists():
-        try:
-            with open(TASKS_FILE, 'r', encoding='utf-8') as f:
-                print("[Tasks] 📄 Loaded from JSON file")
-                return json.load(f)
-        except Exception as e:
-            print(f"[Tasks] Error loading tasks: {e}")
+    tasks_json = _read_json_file(TASKS_FILE, [])
+    if isinstance(tasks_json, list) and tasks_json:
+        print("[Tasks] 📄 Loaded from JSON file")
+        return tasks_json
     return []
 
 def save_tasks(tasks: List[Dict[str, Any]]):
@@ -458,17 +502,27 @@ def load_reminders() -> List[Dict[str, Any]]:
             if reminders:
                 print("[Reminders] ✅ Loaded from MongoDB")
                 return reminders
+
+            json_reminders = _read_json_file(REMINDERS_FILE, [])
+            if isinstance(json_reminders, list) and json_reminders:
+                mongo_db['reminders'].delete_many({"type": "reminder"})
+                for reminder in json_reminders:
+                    reminder["type"] = "reminder"
+                    mongo_db['reminders'].insert_one(reminder)
+                    reminder.pop("type", None)
+                print("[Reminders] 🔁 Migrated JSON -> MongoDB")
+                return json_reminders
+
+            print("[Reminders] ✅ MongoDB is source of truth (0 reminders)")
+            return []
         except Exception as e:
             print(f"[Reminders] ⚠️ MongoDB error: {e}")
     
     # Fallback to JSON file
-    if REMINDERS_FILE.exists():
-        try:
-            with open(REMINDERS_FILE, 'r', encoding='utf-8') as f:
-                print("[Reminders] 📄 Loaded from JSON file")
-                return json.load(f)
-        except Exception:
-            pass
+    reminders_json = _read_json_file(REMINDERS_FILE, [])
+    if isinstance(reminders_json, list) and reminders_json:
+        print("[Reminders] 📄 Loaded from JSON file")
+        return reminders_json
     return []
 
 def save_reminders(reminders: List[Dict[str, Any]]):
@@ -620,6 +674,83 @@ def check_reminders() -> Optional[str]:
 # TIME PARSING FOR REMINDERS
 # ═══════════════════════════════════════════════════════════
 
+def is_reminder_request(message: str) -> bool:
+    """Detect reminder intent in Arabic/English variants."""
+    text = (message or "").lower()
+    triggers = [
+        "ذكرني", "تذكرني", "ذكريني", "تذكريني", "فكرني", "فكريني",
+        "reminder", "remind me"
+    ]
+    return any(t in text for t in triggers)
+
+def normalize_arabic_digits(text: str) -> str:
+    """Normalize Arabic/Persian digits to ASCII digits for regex parsing."""
+    if not text:
+        return text
+    translation = str.maketrans(
+        "٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹",
+        "01234567890123456789"
+    )
+    return text.translate(translation)
+
+def extract_reminder_intent_ai(message: str) -> Optional[Dict[str, Any]]:
+    """Use AI to detect reminder intent with structured output.
+
+    Returns dict with keys:
+      is_reminder: bool
+      reminder_text: str
+      time_expression: str
+      confidence: float
+    """
+    try:
+        response = openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0,
+            max_tokens=160,
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You extract reminder intents from Arabic/English user messages. "
+                        "Return strict JSON only with fields: "
+                        "is_reminder (boolean), reminder_text (string), "
+                        "time_expression (string), confidence (0..1). "
+                        "If user asks status/count of reminders/tasks, set is_reminder=false."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": message
+                }
+            ]
+        )
+        content = response.choices[0].message.content or "{}"
+        data = json.loads(content)
+        return {
+            "is_reminder": bool(data.get("is_reminder", False)),
+            "reminder_text": str(data.get("reminder_text", "") or "").strip(),
+            "time_expression": str(data.get("time_expression", "") or "").strip(),
+            "confidence": float(data.get("confidence", 0.0) or 0.0)
+        }
+    except Exception as e:
+        print(f"[ReminderAI] ⚠️ Intent extraction failed: {e}")
+        return None
+
+def extract_reminder_text(message: str) -> str:
+    """Extract clean reminder payload from user message."""
+    text = message or ""
+    # Remove common reminder verbs
+    text = re.sub(r'(ممكن\s+)?(ت?ذكريني|ت?ذكرني|فكريني|فكرني)', '', text)
+    # Remove time expressions handled by parser
+    text = re.sub(r'(على|عال|ع\s*الساعة|الساعة)\s*\d{1,2}:\d{2}', '', text)
+    text = re.sub(r'(بعد|كمان)\s*\d+\s*(دقيقة|دقايق|ساعه|ساعة|ساعات)', '', text)
+    # Remove wrappers/quotes and filler connectors
+    text = re.sub(r'\b(انو|إنو|انه|أنه|ب|about)\b', ' ', text)
+    text = text.replace('"', ' ').replace("'", ' ')
+    text = re.sub(r'\s+', ' ', text).strip(' ؟?،,.')
+    return text
+
 def parse_reminder_time(message: str) -> Optional[str]:
     """Parse time from reminder message
     Examples:
@@ -627,17 +758,31 @@ def parse_reminder_time(message: str) -> Optional[str]:
     - "ذكرني بعد 30 دقيقة" -> current_time + 30 min
     """
     now = datetime.now()
+    message = normalize_arabic_digits(message)
     
-    # Pattern 1: "على HH:MM" (at specific time)
-    match = re.search(r'على\s+(\d{1,2}):(\d{2})', message)
+    # Pattern 1: "على/عال/الساعة HH:MM" (at specific time)
+    match = re.search(r'(?:على|عال|ع\s*الساعة|الساعة|\bال\b)?\s*(\d{1,2}):(\d{2})', message)
     if match:
         hour = int(match.group(1))
         minute = int(match.group(2))
         try:
-            reminder_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            # If time is in the past, set for tomorrow
-            if reminder_time < now:
-                reminder_time = reminder_time + timedelta(days=1)
+            if hour > 23 or minute > 59:
+                return None
+
+            # Try 24h interpretation first.
+            candidate_times = [now.replace(hour=hour, minute=minute, second=0, microsecond=0)]
+
+            # If user writes 12h style (e.g., 8:49 in evening), also try +12h.
+            if hour <= 12:
+                hour_12h = (hour % 12) + 12
+                candidate_times.append(now.replace(hour=hour_12h, minute=minute, second=0, microsecond=0))
+
+            # Keep only future candidates; if none, push next-day for first candidate.
+            future_candidates = [t for t in candidate_times if t >= now]
+            if future_candidates:
+                reminder_time = min(future_candidates, key=lambda t: (t - now).total_seconds())
+            else:
+                reminder_time = candidate_times[0] + timedelta(days=1)
             
             iso_time = reminder_time.isoformat()
             print(f"[Parse] ⏰ Parsed time: {iso_time} (Now: {now.isoformat()})")
@@ -647,7 +792,7 @@ def parse_reminder_time(message: str) -> Optional[str]:
             pass
     
     # Pattern 2: "بعد X دقيقة" or "كمان X دقيقة" (after X minutes)
-    match = re.search(r'(بعد|كمان)\s+(\d+)\s+دقيقة', message)
+    match = re.search(r'(بعد|كمان)\s+(\d+)\s*(دقيقة|دقايق)', message)
     if match:
         minutes = int(match.group(2))
         reminder_time = now + timedelta(minutes=minutes)
@@ -656,9 +801,9 @@ def parse_reminder_time(message: str) -> Optional[str]:
         return iso_time
     
     # Pattern 3: "بعد X ساعة" (after X hours)
-    match = re.search(r'بعد\s+(\d+)\s+ساعة', message)
+    match = re.search(r'(بعد|كمان)\s+(\d+)\s*(ساعة|ساعه|ساعات)', message)
     if match:
-        hours = int(match.group(1))
+        hours = int(match.group(2))
         reminder_time = now + timedelta(hours=hours)
         iso_time = reminder_time.isoformat()
         print(f"[Parse] ⏰ Parsed time (after {hours}hrs): {iso_time}")
@@ -764,18 +909,29 @@ class SandyAgent:
     def think(self, user_message: str) -> str:
         """Process message through OpenAI and generate response"""
         try:
-            # ⭐️ Check if message contains reminder request
-            if "ذكرني" in user_message or "reminder" in user_message.lower():
-                remind_time = parse_reminder_time(user_message)
-                if remind_time:
-                    # Extract reminder text (remove the time part)
-                    reminder_text = re.sub(r'(على\s+\d{1,2}:\d{2}|بعد\s+\d+\s+(دقيقة|ساعة))', '', user_message)
-                    reminder_text = reminder_text.replace("ذكرني", "").strip()
-                    
-                    if reminder_text:
-                        add_reminder(reminder_text, remind_time)
-                        response = f"[happy] تمام! ✅ بذكرك على {remind_time[-8:-3]} {reminder_text}"
-                        return response
+            # ⭐️ Hybrid reminder intent (AI + rule fallback)
+            ai_intent = extract_reminder_intent_ai(user_message)
+            ai_wants_reminder = bool(ai_intent and ai_intent.get("is_reminder") and ai_intent.get("confidence", 0) >= 0.65)
+
+            if ai_wants_reminder or is_reminder_request(user_message):
+                time_hint = ai_intent.get("time_expression", "") if ai_intent else ""
+                reminder_text = (ai_intent.get("reminder_text", "") if ai_intent else "") or extract_reminder_text(user_message)
+
+                remind_time = None
+                if time_hint:
+                    remind_time = parse_reminder_time(time_hint)
+                if not remind_time:
+                    remind_time = parse_reminder_time(user_message)
+
+                if remind_time and reminder_text:
+                    add_reminder(reminder_text, remind_time)
+                    response = f"[happy] تمام! ✅ بذكرك على {remind_time[-8:-3]} {reminder_text}"
+                    return response
+
+                if not remind_time:
+                    return "[think] فاهم إنك بدك تذكير، بس ما قدرت أفهم الوقت. مثال: ذكريني على 20:49 التذكيرات تمام"
+
+                return "[think] جاهز! حددي نص التذكير مع الوقت، مثال: ذكريني على 20:49 اشرب مي"
             
             # Build the system prompt
             system_prompt = self.build_system_prompt()
