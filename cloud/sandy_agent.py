@@ -67,7 +67,7 @@ SANDY_USER_CHAT_ID = os.getenv("SANDY_USER_CHAT_ID", "").strip()
 
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI", "").strip()
-MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "sandy_db").strip()
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "sany-db").strip()
 
 # Initialize MongoDB connection
 mongo_client = None
