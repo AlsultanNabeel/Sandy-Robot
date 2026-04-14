@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import telebot
 from apscheduler.schedulers.background import BackgroundScheduler
+import certifi
 
 # MongoDB Integration (Optional - requires MONGODB_URI env var)
 try:
@@ -74,28 +75,57 @@ mongo_client = None
 mongo_db = None
 
 if MONGODB_AVAILABLE and MONGODB_URI:
-    try:
-        # Enhanced MongoDB connection with proper SSL/TLS settings
-        # Using tlsAllowInvalidCertificates as workaround for Railway SSL issues
-        mongo_client = MongoClient(
-            MONGODB_URI,
-            serverSelectionTimeoutMS=15000,
-            connectTimeoutMS=15000,
-            socketTimeoutMS=15000,
-            tlsAllowInvalidCertificates=True,  # Workaround for Railway SSL handshake
-            retryWrites=True,
-            maxPoolSize=10,
-            minPoolSize=1
+    def _connect_mongo(uri: str) -> Optional[MongoClient]:
+        """Build Mongo client with Atlas-friendly TLS defaults for cloud runtimes."""
+        base_kwargs = {
+            "serverSelectionTimeoutMS": 20000,
+            "connectTimeoutMS": 20000,
+            "socketTimeoutMS": 20000,
+            "retryWrites": True,
+            "maxPoolSize": 10,
+            "minPoolSize": 1,
+            "appname": "sandy-railway-agent"
+        }
+
+        # Preferred path: validate Atlas certificate chain using certifi bundle.
+        client = MongoClient(
+            uri,
+            tls=True,
+            tlsCAFile=certifi.where(),
+            **base_kwargs
         )
-        # Test connection
-        mongo_client.admin.command('ping')
+        client.admin.command('ping')
+        return client
+
+    try:
+        mongo_client = _connect_mongo(MONGODB_URI)
         mongo_db = mongo_client[MONGODB_DB_NAME]
-        print("[MongoDB] ✅ Connected successfully")
-    except (ServerSelectionTimeoutError, ConnectionFailure) as e:
-        print(f"[MongoDB] ⚠️ Connection failed: {e}")
-        print("[MongoDB] Falling back to JSON memory")
-        mongo_client = None
-        mongo_db = None
+        print(f"[MongoDB] ✅ Connected successfully (db={MONGODB_DB_NAME})")
+    except Exception as first_error:
+        print(f"[MongoDB] ⚠️ Primary TLS connection failed: {first_error}")
+        try:
+            # Last-resort compatibility mode for edge runtime TLS issues.
+            mongo_client = MongoClient(
+                MONGODB_URI,
+                serverSelectionTimeoutMS=20000,
+                connectTimeoutMS=20000,
+                socketTimeoutMS=20000,
+                tls=True,
+                tlsAllowInvalidCertificates=True,
+                retryWrites=True,
+                maxPoolSize=10,
+                minPoolSize=1,
+                appname="sandy-railway-agent-fallback"
+            )
+            mongo_client.admin.command('ping')
+            mongo_db = mongo_client[MONGODB_DB_NAME]
+            print(f"[MongoDB] ✅ Connected with fallback TLS mode (db={MONGODB_DB_NAME})")
+        except Exception as second_error:
+            print(f"[MongoDB] ⚠️ Connection failed: {second_error}")
+            print("[MongoDB] Hint: check Atlas Network Access allowlist and URI credentials")
+            print("[MongoDB] Falling back to JSON memory")
+            mongo_client = None
+            mongo_db = None
 else:
     print("[MongoDB] ⚠️ MONGODB_URI not set, using JSON memory for now")
 
