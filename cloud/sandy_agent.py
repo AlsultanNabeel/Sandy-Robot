@@ -10,6 +10,7 @@ import time
 import asyncio
 import threading
 import re
+from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -791,8 +792,8 @@ def parse_reminder_time(message: str) -> Optional[str]:
             print(f"[Parse] ❌ Error parsing time: {e}")
             pass
     
-    # Pattern 2: "بعد X دقيقة" or "كمان X دقيقة" (after X minutes)
-    match = re.search(r'(بعد|كمان)\s+(\d+)\s*(دقيقة|دقايق)', message)
+    # Pattern 2: "بعد X دقيقة" variants (after X minutes)
+    match = re.search(r'(بعد|كمان)\s*(\d+)\s*(دقيقة|دقيقه|دقائق|دقايق|minute|minutes|min)', message, flags=re.IGNORECASE)
     if match:
         minutes = int(match.group(2))
         reminder_time = now + timedelta(minutes=minutes)
@@ -800,16 +801,68 @@ def parse_reminder_time(message: str) -> Optional[str]:
         print(f"[Parse] ⏰ Parsed time (after {minutes}min): {iso_time}")
         return iso_time
     
-    # Pattern 3: "بعد X ساعة" (after X hours)
-    match = re.search(r'(بعد|كمان)\s+(\d+)\s*(ساعة|ساعه|ساعات)', message)
+    # Pattern 3: "بعد X ساعة" variants (after X hours)
+    match = re.search(r'(بعد|كمان)\s*(\d+)\s*(ساعة|ساعه|ساعات|hour|hours|hr|hrs)', message, flags=re.IGNORECASE)
     if match:
         hours = int(match.group(2))
         reminder_time = now + timedelta(hours=hours)
         iso_time = reminder_time.isoformat()
         print(f"[Parse] ⏰ Parsed time (after {hours}hrs): {iso_time}")
         return iso_time
+
+    print(f"[Parse] ⚠️ Could not parse reminder time from: {message!r}")
     
     return None
+
+def parse_reminder_time_ai(message: str) -> Optional[str]:
+    """Use AI to parse reminder time into ISO timestamp based on current server time."""
+    if not message:
+        return None
+
+    now = datetime.now()
+    now_iso = now.isoformat()
+    try:
+        response = openai_client.chat.completions.create(
+            model=OPENAI_MODEL,
+            temperature=0,
+            max_tokens=140,
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Convert reminder time expressions to JSON only. "
+                        "Return fields: success (boolean), remind_at_iso (string), reason (string). "
+                        "If no time can be inferred, set success=false. "
+                        "Use the provided current datetime as reference and output full ISO format."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"current_datetime={now_iso}\ntext={message}"
+                }
+            ]
+        )
+        payload = json.loads(response.choices[0].message.content or "{}")
+        if not payload.get("success"):
+            print(f"[ParseAI] ⚠️ Could not parse time: {payload.get('reason', 'unknown')}")
+            return None
+
+        iso_value = str(payload.get("remind_at_iso", "")).strip()
+        if not iso_value:
+            return None
+
+        # Validate produced value can be parsed by Python.
+        dt_value = datetime.fromisoformat(iso_value)
+        if dt_value < now:
+            # Guardrail: do not schedule in the past.
+            dt_value = now + timedelta(minutes=1)
+        final_iso = dt_value.isoformat()
+        print(f"[ParseAI] ⏰ Parsed by AI: {final_iso}")
+        return final_iso
+    except Exception as e:
+        print(f"[ParseAI] ⚠️ Fallback parser failed: {e}")
+        return None
 
 # ═══════════════════════════════════════════════════════════
 # SANDY AGENT LOGIC
@@ -922,6 +975,10 @@ class SandyAgent:
                     remind_time = parse_reminder_time(time_hint)
                 if not remind_time:
                     remind_time = parse_reminder_time(user_message)
+                if not remind_time and time_hint:
+                    remind_time = parse_reminder_time_ai(time_hint)
+                if not remind_time:
+                    remind_time = parse_reminder_time_ai(user_message)
 
                 if remind_time and reminder_text:
                     add_reminder(reminder_text, remind_time)
@@ -1059,6 +1116,27 @@ class SandyAgent:
 
 agent = SandyAgent()
 
+# Guard against duplicated Telegram deliveries/restarts.
+_recent_message_keys = deque(maxlen=500)
+_recent_message_set = set()
+_recent_message_lock = threading.Lock()
+
+def _is_duplicate_telegram_message(message) -> bool:
+    """Return True if this Telegram message has already been processed recently."""
+    key = f"{message.chat.id}:{message.message_id}"
+    with _recent_message_lock:
+        if key in _recent_message_set:
+            return True
+
+        if len(_recent_message_keys) == _recent_message_keys.maxlen:
+            old = _recent_message_keys.popleft()
+            _recent_message_set.discard(old)
+
+        _recent_message_keys.append(key)
+        _recent_message_set.add(key)
+
+    return False
+
 @telegram_bot.message_handler(commands=['start', 'help'])
 def handle_start(message):
     """Handle start command"""
@@ -1081,6 +1159,10 @@ def handle_start(message):
 def handle_message(message):
     """Handle all messages"""
     try:
+        if _is_duplicate_telegram_message(message):
+            print(f"[Telegram] Duplicate ignored: chat={message.chat.id}, msg={message.message_id}")
+            return
+
         user_id = message.from_user.id
         user_message = message.text
         chat_id = message.chat.id
