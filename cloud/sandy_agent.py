@@ -182,7 +182,7 @@ def load_memory() -> Dict[str, Any]:
     """Load persistent memory from MongoDB or disk"""
     
     # Try MongoDB first
-    if mongo_db:
+    if mongo_db is not None:
         try:
             memory_doc = mongo_db['memory'].find_one({"_id": "sandy_memory"})
             if memory_doc:
@@ -213,7 +213,7 @@ def save_memory(memory: Dict[str, Any]):
     """Save memory to MongoDB or disk"""
     
     # Try MongoDB first
-    if mongo_db:
+    if mongo_db is not None:
         try:
             memory_with_id = {**memory, "_id": "sandy_memory"}
             mongo_db['memory'].replace_one(
@@ -238,7 +238,7 @@ def load_session() -> Dict[str, Any]:
     """Load current session memory from MongoDB or disk"""
     
     # Try MongoDB first
-    if mongo_db:
+    if mongo_db is not None:
         try:
             session_doc = mongo_db['sessions'].find_one({"_id": "current_session"})
             if session_doc:
@@ -263,7 +263,7 @@ def save_session(session: Dict[str, Any]):
     """Save session memory to MongoDB or disk"""
     
     # Try MongoDB first
-    if mongo_db:
+    if mongo_db is not None:
         try:
             session_with_id = {**session, "_id": "current_session"}
             mongo_db['sessions'].replace_one(
@@ -401,7 +401,7 @@ def load_tasks() -> List[Dict[str, Any]]:
     """Load tasks from MongoDB or disk"""
     
     # Try MongoDB first
-    if mongo_db:
+    if mongo_db is not None:
         try:
             tasks = list(mongo_db['tasks'].find({"type": "task"}))
             for task in tasks:
@@ -426,7 +426,7 @@ def save_tasks(tasks: List[Dict[str, Any]]):
     """Save tasks to MongoDB or disk"""
     
     # Try MongoDB first
-    if mongo_db:
+    if mongo_db is not None:
         try:
             mongo_db['tasks'].delete_many({"type": "task"})
             if tasks:
@@ -450,7 +450,7 @@ def load_reminders() -> List[Dict[str, Any]]:
     """Load reminders from MongoDB or disk"""
     
     # Try MongoDB first
-    if mongo_db:
+    if mongo_db is not None:
         try:
             reminders = list(mongo_db['reminders'].find({"type": "reminder"}))
             for reminder in reminders:
@@ -475,7 +475,7 @@ def save_reminders(reminders: List[Dict[str, Any]]):
     """Save reminders to MongoDB or disk"""
     
     # Try MongoDB first
-    if mongo_db:
+    if mongo_db is not None:
         try:
             mongo_db['reminders'].delete_many({"type": "reminder"})
             if reminders:
