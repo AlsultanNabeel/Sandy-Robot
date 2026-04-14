@@ -25,7 +25,7 @@ try:
     MONGODB_AVAILABLE = True
 except ImportError:
     MONGODB_AVAILABLE = False
-    print("[Warning] PyMongo not available. Install with: pip install pymongo>=4.6.0")
+    print("[Warning] PyMongo not available. To enable: pip install pymongo>=4.6.0")
 
 # Try to import Chroma for smart memory
 try:
