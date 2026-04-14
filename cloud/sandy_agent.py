@@ -76,12 +76,13 @@ mongo_db = None
 if MONGODB_AVAILABLE and MONGODB_URI:
     try:
         # Enhanced MongoDB connection with proper SSL/TLS settings
+        # Using tlsAllowInvalidCertificates as workaround for Railway SSL issues
         mongo_client = MongoClient(
             MONGODB_URI,
             serverSelectionTimeoutMS=15000,
             connectTimeoutMS=15000,
             socketTimeoutMS=15000,
-            ssl=True,
+            tlsAllowInvalidCertificates=True,  # Workaround for Railway SSL handshake
             retryWrites=True,
             maxPoolSize=10,
             minPoolSize=1
