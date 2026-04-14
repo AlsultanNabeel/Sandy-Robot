@@ -1,6 +1,7 @@
 apscheduler==3.11.2
 edge-tts==7.2.3
 openai==2.26.0
+pymongo>=4.6.0
 pydub==0.25.1
 pyTelegramBotAPI==4.32.0
 python-dotenv==1.1.1
