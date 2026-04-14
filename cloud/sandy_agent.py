@@ -17,6 +17,15 @@ from openai import OpenAI
 import telebot
 from apscheduler.schedulers.background import BackgroundScheduler
 
+# MongoDB Integration
+try:
+    from pymongo import MongoClient
+    from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure
+    MONGODB_AVAILABLE = True
+except ImportError:
+    MONGODB_AVAILABLE = False
+    print("[Warning] PyMongo not available, falling back to JSON memory")
+
 # Try to import Chroma for smart memory
 try:
     import chromadb
@@ -54,6 +63,29 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
 # Telegram Configuration (read from environment variables)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 SANDY_USER_CHAT_ID = os.getenv("SANDY_USER_CHAT_ID", "").strip()
+
+# MongoDB Configuration
+MONGODB_URI = os.getenv("MONGODB_URI", "").strip()
+MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "sandy_db").strip()
+
+# Initialize MongoDB connection
+mongo_client = None
+mongo_db = None
+
+if MONGODB_AVAILABLE and MONGODB_URI:
+    try:
+        mongo_client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=5000)
+        # Test connection
+        mongo_client.admin.command('ping')
+        mongo_db = mongo_client[MONGODB_DB_NAME]
+        print("[MongoDB] ✅ Connected successfully")
+    except (ServerSelectionTimeoutError, ConnectionFailure) as e:
+        print(f"[MongoDB] ⚠️ Connection failed: {e}")
+        print("[MongoDB] Falling back to JSON memory")
+        mongo_client = None
+        mongo_db = None
+else:
+    print("[MongoDB] ⚠️ MONGODB_URI not set, using JSON memory for now")
 
 # DEBUG: Print what we're reading
 print("[DEBUG STARTUP] Environment Variables:")
@@ -101,17 +133,33 @@ scheduler = BackgroundScheduler(timezone=None)
 scheduler.start()
 
 # ═══════════════════════════════════════════════════════════
-# MEMORY MANAGEMENT
+# MEMORY MANAGEMENT (MongoDB + JSON Fallback)
 # ═══════════════════════════════════════════════════════════
 
 def load_memory() -> Dict[str, Any]:
-    """Load persistent memory from disk"""
+    """Load persistent memory from MongoDB or disk"""
+    
+    # Try MongoDB first
+    if mongo_db:
+        try:
+            memory_doc = mongo_db['memory'].find_one({"_id": "sandy_memory"})
+            if memory_doc:
+                memory_doc.pop("_id", None)  # Remove MongoDB ID
+                print("[Memory] ✅ Loaded from MongoDB")
+                return memory_doc
+        except Exception as e:
+            print(f"[Memory] ⚠️ MongoDB error: {e}, falling back to JSON")
+    
+    # Fallback to JSON file
     if MEMORY_FILE.exists():
         try:
             with open(MEMORY_FILE, 'r', encoding='utf-8') as f:
+                print("[Memory] 📄 Loaded from JSON file")
                 return json.load(f)
         except Exception as e:
             print(f"[Memory] Error loading memory: {e}")
+    
+    # Return default structure
     return {
         "conversations": [],
         "facts": [],
@@ -120,28 +168,77 @@ def load_memory() -> Dict[str, Any]:
     }
 
 def save_memory(memory: Dict[str, Any]):
-    """Save memory to disk"""
+    """Save memory to MongoDB or disk"""
+    
+    # Try MongoDB first
+    if mongo_db:
+        try:
+            memory_with_id = {**memory, "_id": "sandy_memory"}
+            mongo_db['memory'].replace_one(
+                {"_id": "sandy_memory"},
+                memory_with_id,
+                upsert=True
+            )
+            print("[Memory] ✅ Saved to MongoDB")
+            return
+        except Exception as e:
+            print(f"[Memory] ⚠️ MongoDB save error: {e}, falling back to JSON")
+    
+    # Fallback to JSON file
     try:
         with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
             json.dump(memory, f, ensure_ascii=False, indent=2)
+            print("[Memory] 📄 Saved to JSON file")
     except Exception as e:
         print(f"[Memory] Error saving memory: {e}")
 
 def load_session() -> Dict[str, Any]:
-    """Load current session memory"""
+    """Load current session memory from MongoDB or disk"""
+    
+    # Try MongoDB first
+    if mongo_db:
+        try:
+            session_doc = mongo_db['sessions'].find_one({"_id": "current_session"})
+            if session_doc:
+                session_doc.pop("_id", None)
+                print("[Session] ✅ Loaded from MongoDB")
+                return session_doc
+        except Exception as e:
+            print(f"[Session] ⚠️ MongoDB error: {e}")
+    
+    # Fallback to JSON file
     if SESSION_FILE.exists():
         try:
             with open(SESSION_FILE, 'r', encoding='utf-8') as f:
+                print("[Session] 📄 Loaded from JSON file")
                 return json.load(f)
         except Exception:
             pass
+    
     return {"messages": []}
 
 def save_session(session: Dict[str, Any]):
-    """Save session memory"""
+    """Save session memory to MongoDB or disk"""
+    
+    # Try MongoDB first
+    if mongo_db:
+        try:
+            session_with_id = {**session, "_id": "current_session"}
+            mongo_db['sessions'].replace_one(
+                {"_id": "current_session"},
+                session_with_id,
+                upsert=True
+            )
+            print("[Session] ✅ Saved to MongoDB")
+            return
+        except Exception as e:
+            print(f"[Session] ⚠️ MongoDB save error: {e}")
+    
+    # Fallback to JSON file
     try:
         with open(SESSION_FILE, 'w', encoding='utf-8') as f:
             json.dump(session, f, ensure_ascii=False, indent=2)
+            print("[Session] 📄 Saved to JSON file")
     except Exception as e:
         print(f"[Session] Error saving session: {e}")
 
@@ -259,38 +356,100 @@ def generate_learning_questions(user_message: str, memory: Dict[str, Any]) -> Op
 # ═══════════════════════════════════════════════════════════
 
 def load_tasks() -> List[Dict[str, Any]]:
-    """Load tasks from disk"""
+    """Load tasks from MongoDB or disk"""
+    
+    # Try MongoDB first
+    if mongo_db:
+        try:
+            tasks = list(mongo_db['tasks'].find({"type": "task"}))
+            for task in tasks:
+                task.pop("_id", None)
+            if tasks:
+                print("[Tasks] ✅ Loaded from MongoDB")
+                return tasks
+        except Exception as e:
+            print(f"[Tasks] ⚠️ MongoDB error: {e}")
+    
+    # Fallback to JSON file
     if TASKS_FILE.exists():
         try:
             with open(TASKS_FILE, 'r', encoding='utf-8') as f:
+                print("[Tasks] 📄 Loaded from JSON file")
                 return json.load(f)
         except Exception as e:
             print(f"[Tasks] Error loading tasks: {e}")
     return []
 
 def save_tasks(tasks: List[Dict[str, Any]]):
-    """Save tasks to disk"""
+    """Save tasks to MongoDB or disk"""
+    
+    # Try MongoDB first
+    if mongo_db:
+        try:
+            mongo_db['tasks'].delete_many({"type": "task"})
+            if tasks:
+                for task in tasks:
+                    task["type"] = "task"
+                    mongo_db['tasks'].insert_one(task)
+            print("[Tasks] ✅ Saved to MongoDB")
+            return
+        except Exception as e:
+            print(f"[Tasks] ⚠️ MongoDB save error: {e}")
+    
+    # Fallback to JSON file
     try:
         with open(TASKS_FILE, 'w', encoding='utf-8') as f:
             json.dump(tasks, f, ensure_ascii=False, indent=2)
+            print("[Tasks] 📄 Saved to JSON file")
     except Exception as e:
         print(f"[Tasks] Error saving tasks: {e}")
 
 def load_reminders() -> List[Dict[str, Any]]:
-    """Load reminders from disk"""
+    """Load reminders from MongoDB or disk"""
+    
+    # Try MongoDB first
+    if mongo_db:
+        try:
+            reminders = list(mongo_db['reminders'].find({"type": "reminder"}))
+            for reminder in reminders:
+                reminder.pop("_id", None)
+            if reminders:
+                print("[Reminders] ✅ Loaded from MongoDB")
+                return reminders
+        except Exception as e:
+            print(f"[Reminders] ⚠️ MongoDB error: {e}")
+    
+    # Fallback to JSON file
     if REMINDERS_FILE.exists():
         try:
             with open(REMINDERS_FILE, 'r', encoding='utf-8') as f:
+                print("[Reminders] 📄 Loaded from JSON file")
                 return json.load(f)
         except Exception:
             pass
     return []
 
 def save_reminders(reminders: List[Dict[str, Any]]):
-    """Save reminders to disk"""
+    """Save reminders to MongoDB or disk"""
+    
+    # Try MongoDB first
+    if mongo_db:
+        try:
+            mongo_db['reminders'].delete_many({"type": "reminder"})
+            if reminders:
+                for reminder in reminders:
+                    reminder["type"] = "reminder"
+                    mongo_db['reminders'].insert_one(reminder)
+            print("[Reminders] ✅ Saved to MongoDB")
+            return
+        except Exception as e:
+            print(f"[Reminders] ⚠️ MongoDB save error: {e}")
+    
+    # Fallback to JSON file
     try:
         with open(REMINDERS_FILE, 'w', encoding='utf-8') as f:
             json.dump(reminders, f, ensure_ascii=False, indent=2)
+            print("[Reminders] 📄 Saved to JSON file")
     except Exception as e:
         print(f"[Reminders] Error saving reminders: {e}")
 
