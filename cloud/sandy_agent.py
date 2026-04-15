@@ -10,26 +10,26 @@ import time
 import asyncio
 import threading
 import re
-import atexit
+import io
+import base64
+import tempfile
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import OpenAI, AzureOpenAI
 import telebot
 from apscheduler.schedulers.background import BackgroundScheduler
 import certifi
 
 # MongoDB Integration (Optional - requires MONGODB_URI env var)
 try:
-    from pymongo import MongoClient, ReturnDocument
-    from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure, DuplicateKeyError
+    from pymongo import MongoClient
+    from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure
     MONGODB_AVAILABLE = True
 except ImportError:
     MONGODB_AVAILABLE = False
-    ReturnDocument = None
-    DuplicateKeyError = Exception
     print("[Warning] PyMongo not available. To enable: pip install pymongo>=4.6.0")
 
 # Try to import Chroma for smart memory
@@ -40,6 +40,15 @@ try:
 except ImportError:
     CHROMA_AVAILABLE = False
     print("[Warning] Chroma DB not available, using JSON memory only")
+
+# Try to import Azure Speech SDK for text-to-speech
+try:
+    import azure.cognitiveservices.speech as speechsdk
+    AZURE_SPEECH_AVAILABLE = True
+except ImportError:
+    speechsdk = None
+    AZURE_SPEECH_AVAILABLE = False
+    print("[Warning] Azure Speech SDK not available. To enable: pip install azure-cognitiveservices-speech")
 
 # ═══════════════════════════════════════════════════════════
 # CONFIGURATION & ENV SETUP
@@ -65,6 +74,20 @@ TASKS_DIR.mkdir(parents=True, exist_ok=True)
 # OpenAI Configuration (read from environment variables)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
+
+# Azure OpenAI Configuration
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
+AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY", "").strip()
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview").strip()
+AZURE_OPENAI_CHAT_DEPLOYMENT = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT", "").strip()
+AZURE_OPENAI_VISION_DEPLOYMENT = os.getenv("AZURE_OPENAI_VISION_DEPLOYMENT", "").strip()
+AZURE_OPENAI_STT_DEPLOYMENT = os.getenv("AZURE_OPENAI_STT_DEPLOYMENT", "").strip()
+AZURE_OPENAI_IMAGE_DEPLOYMENT = os.getenv("AZURE_OPENAI_IMAGE_DEPLOYMENT", "").strip()
+
+# Azure Speech Configuration
+AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY", "").strip()
+AZURE_SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION", "").strip()
+AZURE_SPEECH_VOICE = os.getenv("AZURE_SPEECH_VOICE", "ar-EG-SalmaNeural").strip()
 
 # Telegram Configuration (read from environment variables)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
@@ -174,17 +197,223 @@ if not SANDY_USER_CHAT_ID:
     # raise RuntimeError("SANDY_USER_CHAT_ID missing in .env")
 
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
+azure_openai_client = None
+if AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY:
+    try:
+        azure_openai_client = AzureOpenAI(
+            api_key=AZURE_OPENAI_API_KEY,
+            api_version=AZURE_OPENAI_API_VERSION,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT
+        )
+        print("[Azure OpenAI] ✅ Connected")
+    except Exception as e:
+        print(f"[Azure OpenAI] ⚠️ Failed to initialize: {e}")
+
 telegram_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=True)
 scheduler = BackgroundScheduler(timezone=None)
 scheduler.start()
 
-# Polling leader-lock configuration (prevents multiple instances reading getUpdates)
-INSTANCE_ID = f"{os.getenv('RAILWAY_REPLICA_ID') or os.getenv('HOSTNAME') or 'local'}:{os.getpid()}"
-POLLING_LOCK_ID = "telegram_polling_leader"
-POLLING_LOCK_TTL_SECONDS = int(os.getenv("POLLING_LOCK_TTL_SECONDS", "120"))
-_polling_lock_stop = threading.Event()
-_polling_lock_thread = None
-_has_polling_lock = False
+def _chat_client_and_model(prefer_azure: bool = True, model_hint: Optional[str] = None):
+    """Select chat client/model with Azure-first strategy when configured."""
+    if prefer_azure and azure_openai_client is not None:
+        model_name = model_hint or AZURE_OPENAI_CHAT_DEPLOYMENT or OPENAI_MODEL
+        return azure_openai_client, model_name
+    return openai_client, (model_hint or OPENAI_MODEL)
+
+def create_chat_completion(messages: List[Dict[str, Any]], temperature: float = 0.7,
+                           max_tokens: int = 500, response_format: Optional[Dict[str, Any]] = None,
+                           prefer_azure: bool = True, model_hint: Optional[str] = None):
+    """Unified chat completion helper for Azure/OpenAI with optional structured output."""
+    client, model_name = _chat_client_and_model(prefer_azure=prefer_azure, model_hint=model_hint)
+    kwargs = {
+        "model": model_name,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
+    if response_format is not None:
+        kwargs["response_format"] = response_format
+    return client.chat.completions.create(**kwargs)
+
+def download_telegram_file_bytes(file_id: str) -> Optional[tuple]:
+    """Download telegram file bytes. Returns (bytes, file_path) or None."""
+    try:
+        file_info = telegram_bot.get_file(file_id)
+        data = telegram_bot.download_file(file_info.file_path)
+        return data, file_info.file_path
+    except Exception as e:
+        print(f"[Telegram] ❌ File download failed: {e}")
+        return None
+
+def transcribe_audio_with_azure(audio_bytes: bytes, file_name: str = "voice.ogg") -> Optional[str]:
+    """Transcribe audio bytes using Azure OpenAI transcription deployment."""
+    if azure_openai_client is None or not AZURE_OPENAI_STT_DEPLOYMENT:
+        print("[Azure STT] ⚠️ Missing Azure OpenAI client or STT deployment")
+        return None
+
+    suffix = Path(file_name).suffix or ".ogg"
+    temp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(audio_bytes)
+            temp_path = tmp.name
+
+        with open(temp_path, "rb") as f:
+            result = azure_openai_client.audio.transcriptions.create(
+                model=AZURE_OPENAI_STT_DEPLOYMENT,
+                file=f
+            )
+        transcript = (getattr(result, "text", "") or "").strip()
+        if transcript:
+            print(f"[Azure STT] ✅ Transcript: {transcript[:80]}")
+            return transcript
+    except Exception as e:
+        print(f"[Azure STT] ❌ Transcription failed: {e}")
+    finally:
+        if temp_path and Path(temp_path).exists():
+            try:
+                Path(temp_path).unlink()
+            except Exception:
+                pass
+    return None
+
+def synthesize_voice_with_azure(text: str) -> Optional[bytes]:
+    """Synthesize speech with Azure Speech and return WAV bytes."""
+    if not text:
+        return None
+    if not AZURE_SPEECH_AVAILABLE or not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
+        print("[Azure TTS] ⚠️ Speech SDK/key/region not configured")
+        return None
+
+    temp_path = None
+    try:
+        speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
+        speech_config.speech_synthesis_voice_name = AZURE_SPEECH_VOICE
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            temp_path = tmp.name
+
+        audio_config = speechsdk.audio.AudioOutputConfig(filename=temp_path)
+        synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
+        result = synthesizer.speak_text_async(text).get()
+
+        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted and Path(temp_path).exists():
+            with open(temp_path, "rb") as f:
+                audio_bytes = f.read()
+            print("[Azure TTS] ✅ Voice generated")
+            return audio_bytes
+
+        print(f"[Azure TTS] ❌ Synthesis failed: {result.reason}")
+    except Exception as e:
+        print(f"[Azure TTS] ❌ Error: {e}")
+    finally:
+        if temp_path and Path(temp_path).exists():
+            try:
+                Path(temp_path).unlink()
+            except Exception:
+                pass
+    return None
+
+def analyze_image_with_azure(image_bytes: bytes, prompt: str) -> str:
+    """Analyze image bytes using Azure/OpenAI multimodal chat."""
+    if not image_bytes:
+        return "[think] ما قدرت أحلل الصورة حالياً."
+
+    try:
+        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        data_url = f"data:image/jpeg;base64,{image_b64}"
+        model_hint = AZURE_OPENAI_VISION_DEPLOYMENT or AZURE_OPENAI_CHAT_DEPLOYMENT or OPENAI_MODEL
+
+        response = create_chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "حلل الصورة بدقة وباختصار باللغة العربية مع نقاط عملية."
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": data_url}}
+                    ]
+                }
+            ],
+            temperature=0.2,
+            max_tokens=450,
+            prefer_azure=True,
+            model_hint=model_hint
+        )
+        return (response.choices[0].message.content or "[think] تم التحليل لكن ما في وصف واضح.").strip()
+    except Exception as e:
+        print(f"[Azure Vision] ❌ Analysis failed: {e}")
+        return "[think] صار خلل أثناء تحليل الصورة. جرب مرة ثانية."
+
+def generate_image_with_azure(prompt: str, size: str = "1024x1024") -> Optional[bytes]:
+    """Generate image with Azure OpenAI and return image bytes."""
+    if not prompt:
+        return None
+
+    if azure_openai_client is None or not AZURE_OPENAI_IMAGE_DEPLOYMENT:
+        print("[Azure Image] ⚠️ Missing Azure OpenAI client or image deployment")
+        return None
+
+    try:
+        result = azure_openai_client.images.generate(
+            model=AZURE_OPENAI_IMAGE_DEPLOYMENT,
+            prompt=prompt,
+            size=size
+        )
+
+        if not getattr(result, "data", None):
+            print("[Azure Image] ⚠️ Empty image response")
+            return None
+
+        first = result.data[0]
+
+        # Prefer base64 payload when available
+        if getattr(first, "b64_json", None):
+            return base64.b64decode(first.b64_json)
+
+        # Fallback: download image from URL
+        if getattr(first, "url", None):
+            response = requests.get(first.url, timeout=30)
+            if response.status_code == 200:
+                return response.content
+            print(f"[Azure Image] ⚠️ URL download failed with {response.status_code}")
+
+    except Exception as e:
+        print(f"[Azure Image] ❌ Generation failed: {e}")
+
+    return None
+
+def is_image_generation_request(message: str) -> bool:
+    """Detect if user asks for image generation."""
+    text = (message or "").strip().lower()
+    triggers = [
+        "ارسم", "رسمة", "صمم صورة", "ولّد صورة", "generate image", "draw"
+    ]
+    return any(t in text for t in triggers)
+
+def extract_image_prompt(message: str) -> str:
+    """Extract prompt text for image generation."""
+    text = (message or "").strip()
+    text = re.sub(r'^(?:/image|/img)\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'(?:ارسم|رسمة|صمم صورة|ول\s*د صورة|ولّد صورة|generate image|draw)\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
+
+def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Optional[int] = None):
+    """Send text reply and optional Azure-generated voice reply."""
+    telegram_bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id, parse_mode=None)
+
+    audio_bytes = synthesize_voice_with_azure(text)
+    if audio_bytes:
+        try:
+            voice_file = io.BytesIO(audio_bytes)
+            voice_file.name = "sandy_reply.wav"
+            telegram_bot.send_voice(chat_id, voice_file, reply_to_message_id=reply_to_message_id)
+        except Exception as e:
+            print(f"[Telegram] ⚠️ Voice reply failed: {e}")
 
 def prepare_telegram_polling():
     """Clean webhook/pending update state before long polling starts."""
@@ -200,128 +429,6 @@ def prepare_telegram_polling():
             print(f"[Telegram] ⚠️ Webhook clear failed: {e}")
     except Exception as e:
         print(f"[Telegram] ⚠️ Webhook clear failed: {e}")
-
-def acquire_polling_leader_lock() -> bool:
-    """Acquire distributed lock so only one instance performs Telegram polling."""
-    global _has_polling_lock
-    if mongo_db is None or ReturnDocument is None:
-        print("[Lock] ⚠️ Mongo lock unavailable, proceeding without distributed lock")
-        _has_polling_lock = True
-        return True
-
-    now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(seconds=POLLING_LOCK_TTL_SECONDS)
-    try:
-        # Step 1: steal/renew only if lock is ours or expired.
-        result = mongo_db['locks'].update_one(
-            {
-                "_id": POLLING_LOCK_ID,
-                "$or": [
-                    {"owner": INSTANCE_ID},
-                    {"expires_at": {"$lte": now}},
-                    {"expires_at": {"$exists": False}}
-                ]
-            },
-            {
-                "$set": {
-                    "owner": INSTANCE_ID,
-                    "expires_at": expires_at,
-                    "updated_at": now
-                }
-            },
-            upsert=False
-        )
-
-        if result.matched_count == 1:
-            _has_polling_lock = True
-            print(f"[Lock] ✅ Polling lock acquired by {INSTANCE_ID}")
-            return True
-
-        # Step 2: if document does not exist yet, create it atomically.
-        existing = mongo_db['locks'].find_one({"_id": POLLING_LOCK_ID}, {"owner": 1, "expires_at": 1})
-        if existing is None:
-            try:
-                mongo_db['locks'].insert_one(
-                    {
-                        "_id": POLLING_LOCK_ID,
-                        "owner": INSTANCE_ID,
-                        "expires_at": expires_at,
-                        "updated_at": now
-                    }
-                )
-                _has_polling_lock = True
-                print(f"[Lock] ✅ Polling lock created and acquired by {INSTANCE_ID}")
-                return True
-            except DuplicateKeyError:
-                # Another instance created lock at same time.
-                pass
-
-        holder = (existing or {}).get("owner", "unknown")
-        print(f"[Lock] ⏳ Polling lock currently held by {holder}")
-        _has_polling_lock = False
-        return False
-    except Exception as e:
-        print(f"[Lock] ⚠️ Failed to acquire lock: {e}")
-        _has_polling_lock = False
-        return False
-
-def refresh_polling_leader_lock() -> bool:
-    """Extend lock TTL while this instance is actively polling."""
-    global _has_polling_lock
-    if mongo_db is None:
-        return True
-    now = datetime.now(timezone.utc)
-    expires_at = now + timedelta(seconds=POLLING_LOCK_TTL_SECONDS)
-    try:
-        result = mongo_db['locks'].update_one(
-            {"_id": POLLING_LOCK_ID, "owner": INSTANCE_ID},
-            {"$set": {"expires_at": expires_at, "updated_at": now}}
-        )
-        ok = result.matched_count == 1
-        _has_polling_lock = ok
-        return ok
-    except Exception as e:
-        print(f"[Lock] ⚠️ Failed to refresh lock: {e}")
-        _has_polling_lock = False
-        return False
-
-def release_polling_leader_lock():
-    """Release lock on graceful shutdown."""
-    global _has_polling_lock
-    if mongo_db is None:
-        return
-    try:
-        mongo_db['locks'].delete_one({"_id": POLLING_LOCK_ID, "owner": INSTANCE_ID})
-        print(f"[Lock] 🔓 Released polling lock by {INSTANCE_ID}")
-        _has_polling_lock = False
-    except Exception as e:
-        print(f"[Lock] ⚠️ Failed to release lock: {e}")
-
-def start_polling_lock_heartbeat():
-    """Keep distributed lock alive in background while polling runs."""
-    global _polling_lock_thread
-    if mongo_db is None:
-        return
-
-    def _run():
-        interval = max(10, POLLING_LOCK_TTL_SECONDS // 3)
-        while not _polling_lock_stop.is_set():
-            ok = refresh_polling_leader_lock()
-            if not ok:
-                print("[Lock] ⚠️ Lock refresh failed; stopping polling to avoid split-brain")
-                try:
-                    telegram_bot.stop_polling()
-                except Exception:
-                    pass
-                break
-            _polling_lock_stop.wait(interval)
-
-    _polling_lock_stop.clear()
-    _polling_lock_thread = threading.Thread(target=_run, daemon=True)
-    _polling_lock_thread.start()
-    print("[Lock] ✅ Polling lock heartbeat started")
-
-atexit.register(release_polling_leader_lock)
 
 # ═══════════════════════════════════════════════════════════
 # MEMORY MANAGEMENT (MongoDB + JSON Fallback)
@@ -803,7 +910,7 @@ def check_reminders() -> Optional[str]:
                 if SANDY_USER_CHAT_ID:
                     try:
                         chat_id = int(SANDY_USER_CHAT_ID)  # Convert to int
-                        telegram_bot.send_message(chat_id, message_text)
+                        telegram_bot.send_message(chat_id, message_text, parse_mode=None)
                         print(f"[Reminder] ✅ أرسلت: {message_text}")
                     except Exception as e:
                         print(f"[Reminder] ❌ خطأ بالإرسال: {type(e).__name__}: {e}")
@@ -822,15 +929,6 @@ def check_reminders() -> Optional[str]:
 # ═══════════════════════════════════════════════════════════
 # TIME PARSING FOR REMINDERS
 # ═══════════════════════════════════════════════════════════
-
-def is_reminder_request(message: str) -> bool:
-    """Detect reminder intent in Arabic/English variants."""
-    text = (message or "").lower()
-    triggers = [
-        "ذكرني", "تذكرني", "ذكريني", "تذكريني", "فكرني", "فكريني",
-        "reminder", "remind me"
-    ]
-    return any(t in text for t in triggers)
 
 def normalize_arabic_digits(text: str) -> str:
     """Normalize Arabic/Persian digits to ASCII digits for regex parsing."""
@@ -852,11 +950,11 @@ def extract_reminder_intent_ai(message: str) -> Optional[Dict[str, Any]]:
       confidence: float
     """
     try:
-        response = openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
+        response = create_chat_completion(
             temperature=0,
             max_tokens=160,
             response_format={"type": "json_object"},
+            prefer_azure=True,
             messages=[
                 {
                     "role": "system",
@@ -884,6 +982,71 @@ def extract_reminder_intent_ai(message: str) -> Optional[Dict[str, Any]]:
         }
     except Exception as e:
         print(f"[ReminderAI] ⚠️ Intent extraction failed: {e}")
+        return None
+
+def plan_reminder_with_ai(message: str) -> Optional[Dict[str, Any]]:
+    """AI-only reminder planner.
+
+    Returns JSON dict with:
+      is_reminder: bool
+      should_create: bool
+      reminder_text: str
+      remind_at_iso: str
+      assistant_reply: str
+      confidence: float
+    """
+    if not message:
+        return None
+
+    now_iso = datetime.now().isoformat()
+    try:
+        response = create_chat_completion(
+            temperature=0,
+            max_tokens=260,
+            response_format={"type": "json_object"},
+            prefer_azure=True,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a reminder intent planner for an Arabic assistant. "
+                        "Return strict JSON only with fields: "
+                        "is_reminder (bool), should_create (bool), reminder_text (string), "
+                        "remind_at_iso (string), assistant_reply (string), confidence (0..1). "
+                        "Rules: "
+                        "1) If user did not request creating a reminder, set is_reminder=false and should_create=false. "
+                        "2) If user requested a reminder and time+content are clear, set should_create=true and output remind_at_iso in valid ISO datetime (future). "
+                        "3) If user requested reminder but details are missing/ambiguous, set should_create=false and produce assistant_reply in natural friendly colloquial Arabic that addresses the exact user sentence (NOT template). "
+                        "4) assistant_reply must start with one mood tag like [happy] or [think]. "
+                        "5) Never treat normal conversation as reminder."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": f"current_datetime={now_iso}\nmessage={message}"
+                }
+            ]
+        )
+
+        payload = json.loads(response.choices[0].message.content or "{}")
+        remind_at_iso = str(payload.get("remind_at_iso", "") or "").strip()
+        # Normalize/validate returned datetime if present
+        if remind_at_iso:
+            dt_val = datetime.fromisoformat(remind_at_iso)
+            if dt_val < datetime.now():
+                dt_val = datetime.now() + timedelta(minutes=1)
+            remind_at_iso = dt_val.isoformat()
+
+        return {
+            "is_reminder": bool(payload.get("is_reminder", False)),
+            "should_create": bool(payload.get("should_create", False)),
+            "reminder_text": str(payload.get("reminder_text", "") or "").strip(),
+            "remind_at_iso": remind_at_iso,
+            "assistant_reply": str(payload.get("assistant_reply", "") or "").strip(),
+            "confidence": float(payload.get("confidence", 0.0) or 0.0)
+        }
+    except Exception as e:
+        print(f"[ReminderAI] ⚠️ Planner failed: {e}")
         return None
 
 def extract_reminder_text(message: str) -> str:
@@ -970,11 +1133,11 @@ def parse_reminder_time_ai(message: str) -> Optional[str]:
     now = datetime.now()
     now_iso = now.isoformat()
     try:
-        response = openai_client.chat.completions.create(
-            model=OPENAI_MODEL,
+        response = create_chat_completion(
             temperature=0,
             max_tokens=140,
             response_format={"type": "json_object"},
+            prefer_azure=True,
             messages=[
                 {
                     "role": "system",
@@ -1110,33 +1273,23 @@ class SandyAgent:
     def think(self, user_message: str) -> str:
         """Process message through OpenAI and generate response"""
         try:
-            # ⭐️ Hybrid reminder intent (AI + rule fallback)
-            ai_intent = extract_reminder_intent_ai(user_message)
-            ai_wants_reminder = bool(ai_intent and ai_intent.get("is_reminder") and ai_intent.get("confidence", 0) >= 0.65)
+            # AI-only reminder routing (no regex/rule fallback)
+            reminder_plan = plan_reminder_with_ai(user_message)
+            if reminder_plan and reminder_plan.get("is_reminder"):
+                reminder_text = reminder_plan.get("reminder_text", "")
+                remind_at = reminder_plan.get("remind_at_iso", "")
+                should_create = reminder_plan.get("should_create", False)
+                assistant_reply = reminder_plan.get("assistant_reply", "")
 
-            if ai_wants_reminder or is_reminder_request(user_message):
-                time_hint = ai_intent.get("time_expression", "") if ai_intent else ""
-                reminder_text = (ai_intent.get("reminder_text", "") if ai_intent else "") or extract_reminder_text(user_message)
+                if should_create and reminder_text and remind_at:
+                    add_reminder(reminder_text, remind_at)
+                    if assistant_reply:
+                        return assistant_reply
+                    return f"[happy] تمام يا نبيل ✅ سجلت التذكير: {reminder_text}"
 
-                remind_time = None
-                if time_hint:
-                    remind_time = parse_reminder_time(time_hint)
-                if not remind_time:
-                    remind_time = parse_reminder_time(user_message)
-                if not remind_time and time_hint:
-                    remind_time = parse_reminder_time_ai(time_hint)
-                if not remind_time:
-                    remind_time = parse_reminder_time_ai(user_message)
-
-                if remind_time and reminder_text:
-                    add_reminder(reminder_text, remind_time)
-                    response = f"[happy] تمام! ✅ بذكرك على {remind_time[-8:-3]} {reminder_text}"
-                    return response
-
-                if not remind_time:
-                    return "[think] فاهم إنك بدك تذكير، بس ما قدرت أفهم الوقت. مثال: ذكريني على 20:49 التذكيرات تمام"
-
-                return "[think] جاهز! حددي نص التذكير مع الوقت، مثال: ذكريني على 20:49 اشرب مي"
+                if assistant_reply:
+                    return assistant_reply
+                return "[think] فهمت إنك بتحكي عن تذكير، بس بدي تفاصيل أدق شوي حتى أسجله بشكل صحيح."
             
             # Build the system prompt
             system_prompt = self.build_system_prompt()
@@ -1162,14 +1315,14 @@ class SandyAgent:
             ]
             
             # Call OpenAI
-            response = openai_client.chat.completions.create(
-                model=OPENAI_MODEL,
+            response = create_chat_completion(
                 messages=[
                     {"role": "system", "content": system_prompt + "\n\n" + context},
                     *messages
                 ],
                 temperature=0.7,
-                max_tokens=500
+                max_tokens=500,
+                prefer_azure=True
             )
             
             assistant_message = response.choices[0].message.content
@@ -1285,6 +1438,9 @@ def _is_duplicate_telegram_message(message) -> bool:
 
     return False
 
+def _is_authorized_user(message) -> bool:
+    return str(message.from_user.id) == SANDY_USER_CHAT_ID
+
 @telegram_bot.message_handler(commands=['start', 'help'])
 def handle_start(message):
     """Handle start command"""
@@ -1303,7 +1459,147 @@ def handle_start(message):
 """
     telegram_bot.reply_to(message, response)
 
-@telegram_bot.message_handler(func=lambda message: True)
+@telegram_bot.message_handler(commands=['image', 'img'])
+def handle_image_command(message):
+    """Generate image from /image command."""
+    try:
+        if _is_duplicate_telegram_message(message):
+            return
+        if not _is_authorized_user(message):
+            telegram_bot.reply_to(message, "معاف، بس نبيل بيقدر يتكلم معي 🔒")
+            return
+
+        chat_id = message.chat.id
+        prompt = extract_image_prompt(message.text or "")
+        if not prompt:
+            telegram_bot.reply_to(
+                message,
+                "[think] اكتب وصف الصورة بعد الأمر. مثال: /image قطة كرتونية تلبس نظارات"
+            )
+            return
+
+        telegram_bot.send_chat_action(chat_id, 'upload_photo')
+        image_bytes = generate_image_with_azure(prompt)
+        if not image_bytes:
+            telegram_bot.reply_to(
+                message,
+                "[think] ما قدرت أولد الصورة. تأكد من AZURE_OPENAI_IMAGE_DEPLOYMENT."
+            )
+            return
+
+        photo_file = io.BytesIO(image_bytes)
+        photo_file.name = "sandy_generated.png"
+        telegram_bot.send_photo(chat_id, photo_file, caption=f"[happy] تفضّل ✨\nالوصف: {prompt}")
+        send_text_and_voice_reply(chat_id, "[happy] ولدت الصورة بنجاح ✨ إذا بدك أعدل الستايل ابعتلي وصف جديد.", reply_to_message_id=message.message_id)
+    except Exception as e:
+        print(f"[Error] Image command handler: {e}")
+        telegram_bot.reply_to(message, "[think] صار خلل أثناء توليد الصورة.")
+
+@telegram_bot.message_handler(content_types=['photo'])
+def handle_photo(message):
+    """Analyze incoming photo with Azure AI vision."""
+    try:
+        if _is_duplicate_telegram_message(message):
+            return
+        if not _is_authorized_user(message):
+            telegram_bot.reply_to(message, "معاف، بس نبيل بيقدر يتكلم معي 🔒")
+            return
+
+        chat_id = message.chat.id
+        telegram_bot.send_chat_action(chat_id, 'typing')
+
+        photo = message.photo[-1] if message.photo else None
+        if not photo:
+            telegram_bot.reply_to(message, "[think] ما وصلتني الصورة بشكل صحيح.")
+            return
+
+        downloaded = download_telegram_file_bytes(photo.file_id)
+        if not downloaded:
+            telegram_bot.reply_to(message, "[think] ما قدرت أحمّل الصورة من تيليجرام.")
+            return
+
+        image_bytes, _ = downloaded
+        prompt = message.caption or "حللي الصورة باختصار وقدمي أهم الملاحظات."
+        analysis = analyze_image_with_azure(image_bytes, prompt)
+        telegram_bot.send_message(chat_id, analysis, reply_to_message_id=message.message_id, parse_mode=None)
+    except Exception as e:
+        print(f"[Error] Photo handler: {e}")
+        telegram_bot.reply_to(message, "[think] صار خلل أثناء تحليل الصورة.")
+
+@telegram_bot.message_handler(content_types=['video'])
+def handle_video(message):
+    """Analyze video via preview thumbnail to avoid heavy processing errors."""
+    try:
+        if _is_duplicate_telegram_message(message):
+            return
+        if not _is_authorized_user(message):
+            telegram_bot.reply_to(message, "معاف، بس نبيل بيقدر يتكلم معي 🔒")
+            return
+
+        chat_id = message.chat.id
+        telegram_bot.send_chat_action(chat_id, 'typing')
+
+        thumb = getattr(message.video, 'thumbnail', None) or getattr(message.video, 'thumb', None)
+        if not thumb:
+            telegram_bot.send_message(
+                chat_id,
+                "[think] وصل الفيديو، لكن بدون Thumbnail للتحليل البصري."
+                " ابعته كصورة أو فيديو فيه معاينة.",
+                reply_to_message_id=message.message_id,
+                parse_mode=None
+            )
+            return
+
+        downloaded = download_telegram_file_bytes(thumb.file_id)
+        if not downloaded:
+            telegram_bot.reply_to(message, "[think] ما قدرت أحمّل معاينة الفيديو.")
+            return
+
+        image_bytes, _ = downloaded
+        prompt = message.caption or "حللي محتوى الفيديو اعتماداً على لقطة المعاينة وقدمي وصف مختصر."
+        analysis = analyze_image_with_azure(image_bytes, prompt)
+        telegram_bot.send_message(chat_id, analysis, reply_to_message_id=message.message_id, parse_mode=None)
+    except Exception as e:
+        print(f"[Error] Video handler: {e}")
+        telegram_bot.reply_to(message, "[think] صار خلل أثناء تحليل الفيديو.")
+
+@telegram_bot.message_handler(content_types=['voice', 'audio'])
+def handle_voice_or_audio(message):
+    """Transcribe audio with Azure, then respond with text + voice."""
+    try:
+        if _is_duplicate_telegram_message(message):
+            return
+        if not _is_authorized_user(message):
+            telegram_bot.reply_to(message, "معاف، بس نبيل بيقدر يتكلم معي 🔒")
+            return
+
+        chat_id = message.chat.id
+        telegram_bot.send_chat_action(chat_id, 'typing')
+
+        media_obj = message.voice if message.content_type == 'voice' else message.audio
+        if not media_obj:
+            telegram_bot.reply_to(message, "[think] ما قدرت أقرأ الملف الصوتي.")
+            return
+
+        downloaded = download_telegram_file_bytes(media_obj.file_id)
+        if not downloaded:
+            telegram_bot.reply_to(message, "[think] ما قدرت أحمّل الصوت من تيليجرام.")
+            return
+
+        audio_bytes, file_path = downloaded
+        transcript = transcribe_audio_with_azure(audio_bytes, file_path)
+        if not transcript:
+            telegram_bot.reply_to(message, "[think] ما قدرت أحول الصوت لنص. تأكد من إعداد Azure STT.")
+            return
+
+        print(f"[Telegram] Voice transcript: {transcript}")
+        response = agent.think(transcript)
+        send_text_and_voice_reply(chat_id, response, reply_to_message_id=message.message_id)
+    except Exception as e:
+        print(f"[Error] Voice handler: {e}")
+        telegram_bot.reply_to(message, "[think] صار خلل أثناء تحليل الصوت.")
+
+@telegram_bot.message_handler(content_types=['text'])
 def handle_message(message):
     """Handle all messages"""
     try:
@@ -1311,13 +1607,42 @@ def handle_message(message):
             print(f"[Telegram] Duplicate ignored: chat={message.chat.id}, msg={message.message_id}")
             return
 
-        user_id = message.from_user.id
-        user_message = message.text
+        user_message = (message.text or "").strip()
         chat_id = message.chat.id
-        
-        # Only respond to Sandy's chat
-        if str(user_id) != SANDY_USER_CHAT_ID:
+
+        if not _is_authorized_user(message):
             telegram_bot.reply_to(message, "معاف، بس نبيل بيقدر يتكلم معي 🔒")
+            return
+
+        if not user_message:
+            telegram_bot.reply_to(message, "[think] ما وصلني نص الرسالة.")
+            return
+
+        # Image generation path (text command)
+        if is_image_generation_request(user_message):
+            prompt = extract_image_prompt(user_message)
+            if not prompt:
+                telegram_bot.reply_to(message, "[think] اكتب وصف واضح للصورة اللي بدك ياها.")
+                return
+
+            telegram_bot.send_chat_action(chat_id, 'upload_photo')
+            image_bytes = generate_image_with_azure(prompt)
+            if not image_bytes:
+                telegram_bot.reply_to(
+                    message,
+                    "[think] ما قدرت أولد الصورة حالياً. تأكد من إعداد Azure image deployment."
+                )
+                return
+
+            photo_file = io.BytesIO(image_bytes)
+            photo_file.name = "sandy_generated.png"
+            telegram_bot.send_photo(
+                chat_id,
+                photo_file,
+                caption=f"[happy] هاي الصورة اللي طلبتها ✨\nالوصف: {prompt}",
+                reply_to_message_id=message.message_id
+            )
+            send_text_and_voice_reply(chat_id, "[happy] جاهزة 👌 إذا بدك نسخة ثانية بستايل مختلف احكيلي الوصف الجديد.", reply_to_message_id=message.message_id)
             return
         
         # Show typing indicator
@@ -1326,9 +1651,8 @@ def handle_message(message):
         # Process message through Sandy Agent
         print(f"[Telegram] Message from {message.from_user.first_name}: {user_message}")
         response = agent.think(user_message)
-        
-        # Send response
-        telegram_bot.reply_to(message, response, parse_mode='Markdown')
+
+        send_text_and_voice_reply(chat_id, response, reply_to_message_id=message.message_id)
         
     except Exception as e:
         print(f"[Error] Telegram handler: {e}")
@@ -1342,7 +1666,7 @@ def daily_briefing():
     """Send daily briefing at 9 AM"""
     try:
         briefing = agent.think("قدملي ملخص يومي عن اللي صار")
-        telegram_bot.send_message(SANDY_USER_CHAT_ID, f"[morning] صباح الخير يا نبيل! ☀️\n\n{briefing}")
+        telegram_bot.send_message(SANDY_USER_CHAT_ID, f"[morning] صباح الخير يا نبيل! ☀️\n\n{briefing}", parse_mode=None)
     except Exception as e:
         print(f"[Briefing] Error: {e}")
 
@@ -1367,16 +1691,9 @@ def main():
     print("[Status] Ready! Listening for messages...")
     print("=" * 60)
 
+    prepare_telegram_polling()
+
     while True:
-        prepare_telegram_polling()
-
-        # Wait until this instance becomes polling leader.
-        while not acquire_polling_leader_lock():
-            print("[Lock] ⏳ Waiting 10s before retrying polling lock...")
-            time.sleep(10)
-
-        start_polling_lock_heartbeat()
-
         try:
             telegram_bot.infinity_polling(
                 skip_pending=False,
@@ -1391,8 +1708,6 @@ def main():
             else:
                 print(f"[Telegram] ❌ Polling crashed: {e}")
 
-        _polling_lock_stop.set()
-        release_polling_leader_lock()
         time.sleep(5)
 
 if __name__ == "__main__":
