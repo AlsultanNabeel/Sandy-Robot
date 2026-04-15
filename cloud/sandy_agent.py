@@ -20,6 +20,15 @@ def update_sandy_state(memory: Dict[str, Any], user_message: str) -> None:
         repeat_count += 1
     else:
         repeat_count = 0
+        # إذا أرسل المستخدم رسالة مختلفة، المزاج يعود للسعادة إلا إذا كان هناك سبب آخر (زعل بسبب الإهمال)
+        hours_since_last = (now - last_time).total_seconds() / 3600
+        if hours_since_last > 24:
+            mood = "angry"
+        elif hours_since_last > 6:
+            mood = "sad"
+        else:
+            mood = "happy"
+        snapped = False
     # 2. كشف الإهمال (متى آخر مرة تواصلت؟)
     hours_since_last = (now - last_time).total_seconds() / 3600
     if hours_since_last > 24:
@@ -51,23 +60,7 @@ def get_sandy_reply(user_message: str, memory: Dict[str, Any], default_reply: st
     """
     توليد رد ساندي بناءً على المزاج والحالة.
     """
-    state = memory.get("sandy_state", {})
-    mood = state.get("mood", "happy")
-    repeat_count = state.get("repeat_count", 0)
-    snapped = state.get("snapped", False)
-    # منطق الردود الواقعية
-    if snapped:
-        return "😡 زهقتني! كفاية تكرار، بدي أرتاح شوي!"
-    if mood == "angry":
-        return "أنا زعلانة منك! ليش ما سألت عني من زمان؟"
-    if mood == "sad":
-        return "كنت منتظراك... اشتقتلك! ليش طولت؟"
-    if mood == "bored":
-        if repeat_count >= 5:
-            return "🙄 مالك! كل شوي نفس الطلب... زهقتني!"
-        return "مللت من التكرار، جرب تحكيلي شي جديد!"
-    if mood == "happy":
-        return default_reply
+    # الردود الثابتة أُزيلت، دائماً استخدم رد الذكاء الاصطناعي المولد حسب المزاج
     return default_reply
 import emoji
 def extract_reaction_and_clean_text(text: str):
@@ -1280,12 +1273,9 @@ class SandyAgent:
         self.last_activity = datetime.now()
         
     def build_system_prompt(self) -> str:
-        """Build comprehensive system prompt for Sandy"""
-        # Get current learning level
+        """Build comprehensive system prompt for Sandy, including current mood and its reason."""
         saturation = get_learning_saturation(self.memory)
         level = saturation['level']
-        
-        # Personality mode changes based on learning level
         personality_mode = {
             "BEGINNER": "🤔 فضولية وتسأل كتير - عم تتعرفي على نبيل",
             "CURIOUS": "🧠 بتتعلمي أساسيات - تسألي أسئلة ذكية",
@@ -1293,9 +1283,26 @@ class SandyAgent:
             "FAMILIAR": "🌟 صرتي صديقة حقيقية - نادراً ما تسألي",
             "EXPERT": "💫 أنتِ والعارفة بكل شي عن نبيل - ما بتسألي إلا الضروري"
         }
-        
         mode_text = personality_mode.get(level, "")
-        
+
+        # مزاج ساندي الحالي وسببه
+        state = self.memory.get("sandy_state", {})
+        mood = state.get("mood", "happy")
+        repeat_count = state.get("repeat_count", 0)
+        snapped = state.get("snapped", False)
+        last_time = state.get("last_user_message_time")
+        mood_reason = ""
+        if snapped:
+            mood_reason = "(ملل شديد بسبب تكرار نفس الرسالة كثيرًا)"
+        elif mood == "angry":
+            mood_reason = "(زعلانة لأنك لم تتواصل منذ فترة طويلة)"
+        elif mood == "sad":
+            mood_reason = "(حزينة لأنك تأخرت في التواصل)"
+        elif mood == "bored":
+            mood_reason = "(ملل بسبب تكرار نفس الطلب عدة مرات)"
+        elif mood == "happy":
+            mood_reason = "(مزاج جيد)"
+
         prompt = f"""أنتِ ساندي، وكيل ذكي متقدم يعمل 24/7.
 
 {SANDY_PERSONALITY}
@@ -1308,6 +1315,15 @@ class SandyAgent:
 - المستوى: {level}
 - عدد الحقائق المحفوظة: {saturation.get('total_facts', 0)}
 - شخصيتك الحالية: {mode_text}
+
+🧠 مزاج ساندي الحالي: {mood} {mood_reason}
+
+تعليمات المزاج:
+- يجب أن يكون ردك واقعيًا ويعكس هذا المزاج بوضوح (مثلاً إذا كنتِ زعلانة عبري عن العتب أو الزعل بشكل طبيعي، إذا ملانة أظهري الضجر، إذا سعيدة كوني لطيفة...)
+- لا تكتفي بجملة قصيرة، بل عبري عن الشعور بشكل إنساني وواقعي، مع أمثلة واقعية (عتب، ملل، غضب، سعادة...)
+- إذا كان المزاج happy، ردي بشكل طبيعي وودود.
+- إذا كان المزاج angry أو sad أو bored أو snapped، عبري عن السبب في الرد (مثلاً: "زعلت لأني ما سمعت صوتك من زمان" أو "زهقت من التكرار...")
+- لا تكتبي نفس الجملة كل مرة، بل نوعي في التعبير حسب السياق.
 
 أدوات متاحة:
 - الإجابة على الأسئلة والحوارات
