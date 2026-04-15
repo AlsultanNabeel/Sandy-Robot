@@ -1,3 +1,17 @@
+import emoji
+def extract_reaction_and_clean_text(text: str):
+    """
+    استخراج الرياكشن (مثل [happy]) من بداية الرد، وحفظه في متغير منفصل.
+    هذا المتغير مهم لتمريره للهاردوير (الشاشة) مستقبلاً.
+    يرجع (reaction, text_without_reaction)
+    """
+    reaction = None
+    cleaned = text.strip()
+    match = re.match(r"^\[([a-zA-Z_]+)\]\s*", cleaned)
+    if match:
+        reaction = match.group(1)
+        cleaned = cleaned[match.end():].strip()
+    return reaction, cleaned
 #!/usr/bin/env python3
 """
 Sandy Agent - 24/7 Intelligent Assistant on Railway
@@ -406,9 +420,22 @@ def extract_image_prompt(message: str) -> str:
 
 def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Optional[int] = None):
     """Send text reply and optional Azure-generated voice reply."""
-    telegram_bot.send_message(chat_id, text, reply_to_message_id=reply_to_message_id, parse_mode=None)
 
-    audio_bytes = synthesize_voice_with_azure(text)
+    # استخرج الرياكشن من الرد (إذا موجود)
+    reaction, text_without_reaction = extract_reaction_and_clean_text(text)
+    # حفظ الرياكشن في متغير عالمي (للهاردوير لاحقاً)
+    global LAST_ASSISTANT_REACTION
+    LAST_ASSISTANT_REACTION = reaction
+    # توثيق: هذا المتغير مهم لتمرير الرياكشن للهاردوير (الشاشة) مستقبلاً
+
+    telegram_bot.send_message(chat_id, text_without_reaction, reply_to_message_id=reply_to_message_id, parse_mode=None)
+
+    # إزالة الإيموجي من النص الصوتي حتى لا تُقرأ كنص
+    def remove_emojis(s):
+        return emoji.replace_emoji(s, replace="")
+
+    tts_text = remove_emojis(text_without_reaction)
+    audio_bytes = synthesize_voice_with_azure(tts_text)
     if audio_bytes:
         try:
             voice_file = io.BytesIO(audio_bytes)
