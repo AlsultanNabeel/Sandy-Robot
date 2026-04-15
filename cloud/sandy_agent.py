@@ -24,11 +24,12 @@ import certifi
 # MongoDB Integration (Optional - requires MONGODB_URI env var)
 try:
     from pymongo import MongoClient, ReturnDocument
-    from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure
+    from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure, DuplicateKeyError
     MONGODB_AVAILABLE = True
 except ImportError:
     MONGODB_AVAILABLE = False
     ReturnDocument = None
+    DuplicateKeyError = Exception
     print("[Warning] PyMongo not available. To enable: pip install pymongo>=4.6.0")
 
 # Try to import Chroma for smart memory
@@ -183,6 +184,7 @@ POLLING_LOCK_ID = "telegram_polling_leader"
 POLLING_LOCK_TTL_SECONDS = int(os.getenv("POLLING_LOCK_TTL_SECONDS", "120"))
 _polling_lock_stop = threading.Event()
 _polling_lock_thread = None
+_has_polling_lock = False
 
 def prepare_telegram_polling():
     """Clean webhook/pending update state before long polling starts."""
@@ -201,14 +203,17 @@ def prepare_telegram_polling():
 
 def acquire_polling_leader_lock() -> bool:
     """Acquire distributed lock so only one instance performs Telegram polling."""
+    global _has_polling_lock
     if mongo_db is None or ReturnDocument is None:
         print("[Lock] ⚠️ Mongo lock unavailable, proceeding without distributed lock")
+        _has_polling_lock = True
         return True
 
     now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=POLLING_LOCK_TTL_SECONDS)
     try:
-        doc = mongo_db['locks'].find_one_and_update(
+        # Step 1: steal/renew only if lock is ours or expired.
+        result = mongo_db['locks'].update_one(
             {
                 "_id": POLLING_LOCK_ID,
                 "$or": [
@@ -224,23 +229,45 @@ def acquire_polling_leader_lock() -> bool:
                     "updated_at": now
                 }
             },
-            upsert=True,
-            return_document=ReturnDocument.AFTER
+            upsert=False
         )
 
-        acquired = bool(doc and doc.get("owner") == INSTANCE_ID)
-        if acquired:
+        if result.matched_count == 1:
+            _has_polling_lock = True
             print(f"[Lock] ✅ Polling lock acquired by {INSTANCE_ID}")
-        else:
-            holder = doc.get("owner") if doc else "unknown"
-            print(f"[Lock] ⏳ Polling lock currently held by {holder}")
-        return acquired
+            return True
+
+        # Step 2: if document does not exist yet, create it atomically.
+        existing = mongo_db['locks'].find_one({"_id": POLLING_LOCK_ID}, {"owner": 1, "expires_at": 1})
+        if existing is None:
+            try:
+                mongo_db['locks'].insert_one(
+                    {
+                        "_id": POLLING_LOCK_ID,
+                        "owner": INSTANCE_ID,
+                        "expires_at": expires_at,
+                        "updated_at": now
+                    }
+                )
+                _has_polling_lock = True
+                print(f"[Lock] ✅ Polling lock created and acquired by {INSTANCE_ID}")
+                return True
+            except DuplicateKeyError:
+                # Another instance created lock at same time.
+                pass
+
+        holder = (existing or {}).get("owner", "unknown")
+        print(f"[Lock] ⏳ Polling lock currently held by {holder}")
+        _has_polling_lock = False
+        return False
     except Exception as e:
         print(f"[Lock] ⚠️ Failed to acquire lock: {e}")
-        return True
+        _has_polling_lock = False
+        return False
 
 def refresh_polling_leader_lock() -> bool:
     """Extend lock TTL while this instance is actively polling."""
+    global _has_polling_lock
     if mongo_db is None:
         return True
     now = datetime.now(timezone.utc)
@@ -250,18 +277,23 @@ def refresh_polling_leader_lock() -> bool:
             {"_id": POLLING_LOCK_ID, "owner": INSTANCE_ID},
             {"$set": {"expires_at": expires_at, "updated_at": now}}
         )
-        return result.modified_count == 1
+        ok = result.matched_count == 1
+        _has_polling_lock = ok
+        return ok
     except Exception as e:
         print(f"[Lock] ⚠️ Failed to refresh lock: {e}")
+        _has_polling_lock = False
         return False
 
 def release_polling_leader_lock():
     """Release lock on graceful shutdown."""
+    global _has_polling_lock
     if mongo_db is None:
         return
     try:
         mongo_db['locks'].delete_one({"_id": POLLING_LOCK_ID, "owner": INSTANCE_ID})
         print(f"[Lock] 🔓 Released polling lock by {INSTANCE_ID}")
+        _has_polling_lock = False
     except Exception as e:
         print(f"[Lock] ⚠️ Failed to release lock: {e}")
 
@@ -276,7 +308,12 @@ def start_polling_lock_heartbeat():
         while not _polling_lock_stop.is_set():
             ok = refresh_polling_leader_lock()
             if not ok:
-                print("[Lock] ⚠️ Lock refresh failed; polling may be preempted")
+                print("[Lock] ⚠️ Lock refresh failed; stopping polling to avoid split-brain")
+                try:
+                    telegram_bot.stop_polling()
+                except Exception:
+                    pass
+                break
             _polling_lock_stop.wait(interval)
 
     _polling_lock_stop.clear()
@@ -1330,17 +1367,16 @@ def main():
     print("[Status] Ready! Listening for messages...")
     print("=" * 60)
 
-    prepare_telegram_polling()
-
-    # Wait until this instance becomes polling leader.
-    while not acquire_polling_leader_lock():
-        print("[Lock] ⏳ Waiting 10s before retrying polling lock...")
-        time.sleep(10)
-
-    start_polling_lock_heartbeat()
-
-    # Start polling with retry loop to survive transient Telegram 409 conflicts.
     while True:
+        prepare_telegram_polling()
+
+        # Wait until this instance becomes polling leader.
+        while not acquire_polling_leader_lock():
+            print("[Lock] ⏳ Waiting 10s before retrying polling lock...")
+            time.sleep(10)
+
+        start_polling_lock_heartbeat()
+
         try:
             telegram_bot.infinity_polling(
                 skip_pending=False,
@@ -1352,11 +1388,12 @@ def main():
             msg = str(e)
             if "Error code: 409" in msg or "terminated by other getUpdates request" in msg:
                 print("[Telegram] ⚠️ Polling conflict (409). Retrying in 5s...")
-                time.sleep(5)
-                continue
+            else:
+                print(f"[Telegram] ❌ Polling crashed: {e}")
 
-            print(f"[Telegram] ❌ Polling crashed: {e}")
-            time.sleep(3)
+        _polling_lock_stop.set()
+        release_polling_leader_lock()
+        time.sleep(5)
 
 if __name__ == "__main__":
     main()
