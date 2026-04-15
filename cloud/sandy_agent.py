@@ -10,6 +10,7 @@ import time
 import asyncio
 import threading
 import re
+import atexit
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -22,11 +23,12 @@ import certifi
 
 # MongoDB Integration (Optional - requires MONGODB_URI env var)
 try:
-    from pymongo import MongoClient
+    from pymongo import MongoClient, ReturnDocument
     from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure
     MONGODB_AVAILABLE = True
 except ImportError:
     MONGODB_AVAILABLE = False
+    ReturnDocument = None
     print("[Warning] PyMongo not available. To enable: pip install pymongo>=4.6.0")
 
 # Try to import Chroma for smart memory
@@ -174,6 +176,115 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 telegram_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=True)
 scheduler = BackgroundScheduler(timezone=None)
 scheduler.start()
+
+# Polling leader-lock configuration (prevents multiple instances reading getUpdates)
+INSTANCE_ID = f"{os.getenv('RAILWAY_REPLICA_ID') or os.getenv('HOSTNAME') or 'local'}:{os.getpid()}"
+POLLING_LOCK_ID = "telegram_polling_leader"
+POLLING_LOCK_TTL_SECONDS = int(os.getenv("POLLING_LOCK_TTL_SECONDS", "120"))
+_polling_lock_stop = threading.Event()
+_polling_lock_thread = None
+
+def prepare_telegram_polling():
+    """Clean webhook/pending update state before long polling starts."""
+    try:
+        telegram_bot.remove_webhook(drop_pending_updates=True)
+        print("[Telegram] ✅ Webhook cleared; pending updates dropped")
+    except TypeError:
+        # Compatibility fallback for older client signatures.
+        try:
+            telegram_bot.remove_webhook()
+            print("[Telegram] ✅ Webhook cleared")
+        except Exception as e:
+            print(f"[Telegram] ⚠️ Webhook clear failed: {e}")
+    except Exception as e:
+        print(f"[Telegram] ⚠️ Webhook clear failed: {e}")
+
+def acquire_polling_leader_lock() -> bool:
+    """Acquire distributed lock so only one instance performs Telegram polling."""
+    if mongo_db is None or ReturnDocument is None:
+        print("[Lock] ⚠️ Mongo lock unavailable, proceeding without distributed lock")
+        return True
+
+    now = datetime.utcnow()
+    expires_at = now + timedelta(seconds=POLLING_LOCK_TTL_SECONDS)
+    try:
+        doc = mongo_db['locks'].find_one_and_update(
+            {
+                "_id": POLLING_LOCK_ID,
+                "$or": [
+                    {"owner": INSTANCE_ID},
+                    {"expires_at": {"$lte": now}},
+                    {"expires_at": {"$exists": False}}
+                ]
+            },
+            {
+                "$set": {
+                    "owner": INSTANCE_ID,
+                    "expires_at": expires_at,
+                    "updated_at": now
+                }
+            },
+            upsert=True,
+            return_document=ReturnDocument.AFTER
+        )
+
+        acquired = bool(doc and doc.get("owner") == INSTANCE_ID)
+        if acquired:
+            print(f"[Lock] ✅ Polling lock acquired by {INSTANCE_ID}")
+        else:
+            holder = doc.get("owner") if doc else "unknown"
+            print(f"[Lock] ⏳ Polling lock currently held by {holder}")
+        return acquired
+    except Exception as e:
+        print(f"[Lock] ⚠️ Failed to acquire lock: {e}")
+        return True
+
+def refresh_polling_leader_lock() -> bool:
+    """Extend lock TTL while this instance is actively polling."""
+    if mongo_db is None:
+        return True
+    now = datetime.utcnow()
+    expires_at = now + timedelta(seconds=POLLING_LOCK_TTL_SECONDS)
+    try:
+        result = mongo_db['locks'].update_one(
+            {"_id": POLLING_LOCK_ID, "owner": INSTANCE_ID},
+            {"$set": {"expires_at": expires_at, "updated_at": now}}
+        )
+        return result.modified_count == 1
+    except Exception as e:
+        print(f"[Lock] ⚠️ Failed to refresh lock: {e}")
+        return False
+
+def release_polling_leader_lock():
+    """Release lock on graceful shutdown."""
+    if mongo_db is None:
+        return
+    try:
+        mongo_db['locks'].delete_one({"_id": POLLING_LOCK_ID, "owner": INSTANCE_ID})
+        print(f"[Lock] 🔓 Released polling lock by {INSTANCE_ID}")
+    except Exception as e:
+        print(f"[Lock] ⚠️ Failed to release lock: {e}")
+
+def start_polling_lock_heartbeat():
+    """Keep distributed lock alive in background while polling runs."""
+    global _polling_lock_thread
+    if mongo_db is None:
+        return
+
+    def _run():
+        interval = max(10, POLLING_LOCK_TTL_SECONDS // 3)
+        while not _polling_lock_stop.is_set():
+            ok = refresh_polling_leader_lock()
+            if not ok:
+                print("[Lock] ⚠️ Lock refresh failed; polling may be preempted")
+            _polling_lock_stop.wait(interval)
+
+    _polling_lock_stop.clear()
+    _polling_lock_thread = threading.Thread(target=_run, daemon=True)
+    _polling_lock_thread.start()
+    print("[Lock] ✅ Polling lock heartbeat started")
+
+atexit.register(release_polling_leader_lock)
 
 # ═══════════════════════════════════════════════════════════
 # MEMORY MANAGEMENT (MongoDB + JSON Fallback)
@@ -1218,9 +1329,18 @@ def main():
     print("=" * 60)
     print("[Status] Ready! Listening for messages...")
     print("=" * 60)
-    
+
+    prepare_telegram_polling()
+
+    # Wait until this instance becomes polling leader.
+    while not acquire_polling_leader_lock():
+        print("[Lock] ⏳ Waiting 10s before retrying polling lock...")
+        time.sleep(10)
+
+    start_polling_lock_heartbeat()
+
     # Start polling
-    telegram_bot.infinity_polling()
+    telegram_bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
 
 if __name__ == "__main__":
     main()
