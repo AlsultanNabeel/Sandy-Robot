@@ -438,9 +438,7 @@ def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Opti
     audio_bytes = synthesize_voice_with_azure(tts_text)
     if audio_bytes:
         try:
-            voice_file = io.BytesIO(audio_bytes)
-            voice_file.name = "sandy_reply.wav"
-            telegram_bot.send_voice(chat_id, voice_file, reply_to_message_id=reply_to_message_id)
+            telegram_bot.send_voice(chat_id, audio_bytes, timeout=120)
         except Exception as e:
             print(f"[Telegram] ⚠️ Voice reply failed: {e}")
 
@@ -694,8 +692,7 @@ def generate_learning_questions(user_message: str, memory: Dict[str, Any]) -> Op
         questions.append("بديني أعرّف نفسي أحسن! 🤖 شنو بتحب تنادي عليك اسمي؟ وشنو وظيفتي عندك؟")
     
     # Ask about preferences
-    if "preference" not in learned_topics and "احب" in user_message or "حب" in user_message:
-        questions.append("واااو! 😍 تحب هالشي؟ ممكن تقول لي أكتر عن اهتماماتك؟")
+    # تم تعطيل الرد التلقائي على كلمة "احب" أو "حب" بناءً على طلب المستخدم
     
     return questions[0] if questions else None
 
