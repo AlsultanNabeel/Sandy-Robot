@@ -176,6 +176,8 @@ SESSION_FILE = MEMORY_DIR / "sandy_session_memory.json"
 TASKS_FILE = TASKS_DIR / "daily_plan.json"
 REMINDERS_FILE = TASKS_DIR / "reminders.json"
 
+from flask import Flask, request, abort
+
 # ═══════════════════════════════════════════════════════════
 # INITIALIZATION
 # ═══════════════════════════════════════════════════════════
@@ -415,20 +417,7 @@ def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Opti
         except Exception as e:
             print(f"[Telegram] ⚠️ Voice reply failed: {e}")
 
-def prepare_telegram_polling():
-    """Clean webhook/pending update state before long polling starts."""
-    try:
-        telegram_bot.remove_webhook(drop_pending_updates=True)
-        print("[Telegram] ✅ Webhook cleared; pending updates dropped")
-    except TypeError:
-        # Compatibility fallback for older client signatures.
-        try:
-            telegram_bot.remove_webhook()
-            print("[Telegram] ✅ Webhook cleared")
-        except Exception as e:
-            print(f"[Telegram] ⚠️ Webhook clear failed: {e}")
-    except Exception as e:
-        print(f"[Telegram] ⚠️ Webhook clear failed: {e}")
+
 
 # ═══════════════════════════════════════════════════════════
 # MEMORY MANAGEMENT (MongoDB + JSON Fallback)
@@ -1710,5 +1699,50 @@ def main():
 
         time.sleep(5)
 
+
+# ═══════════════════════════════════════════════════════════
+# FLASK WEBHOOK MODE (RAILWAY/PRODUCTION)
+# ═══════════════════════════════════════════════════════════
+
+TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN", "").strip()
+RAILWAY_URL = os.getenv("RAILWAY_URL", "").strip()
+WEBHOOK_PATH = f"/webhook/{TELEGRAM_SECRET_TOKEN}" if TELEGRAM_SECRET_TOKEN else "/webhook"
+
+app = Flask(__name__)
+
+@app.route(WEBHOOK_PATH, methods=["POST"])
+def telegram_webhook():
+    # تحقق من التوكن السري (Telegram header)
+    if TELEGRAM_SECRET_TOKEN:
+        header_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+        if header_token != TELEGRAM_SECRET_TOKEN:
+            abort(403)
+    if request.method == "POST":
+        try:
+            telegram_bot.process_new_updates([
+                telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
+            ])
+        except Exception as e:
+            print(f"[Webhook] ❌ Error: {e}")
+        return "OK", 200
+    return "Method Not Allowed", 405
+
+def set_telegram_webhook():
+    if not TELEGRAM_BOT_TOKEN or not RAILWAY_URL:
+        print("[Webhook] TELEGRAM_BOT_TOKEN or RAILWAY_URL not set!")
+        return
+    webhook_url = RAILWAY_URL
+    if not webhook_url.startswith("http"):
+        webhook_url = "https://" + webhook_url
+    webhook_url = webhook_url.rstrip("/") + WEBHOOK_PATH
+    print(f"[Webhook] Setting webhook to: {webhook_url}")
+    telegram_bot.remove_webhook()
+    telegram_bot.set_webhook(
+        url=webhook_url,
+        secret_token=TELEGRAM_SECRET_TOKEN if TELEGRAM_SECRET_TOKEN else None
+    )
+
 if __name__ == "__main__":
-    main()
+    set_telegram_webhook()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
