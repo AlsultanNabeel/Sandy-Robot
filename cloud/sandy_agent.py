@@ -1,3 +1,73 @@
+# ========== SANDY PERSONALITY ENGINE ==========
+def update_sandy_state(memory: Dict[str, Any], user_message: str) -> None:
+    """
+    تحديث مزاج ساندي وحالتها بناءً على تفاعل المستخدم.
+    - تتبع آخر تواصل
+    - كشف التكرار
+    - تغيير المزاج (زعل، ملل، غضب، سعادة)
+    - حفظ تفضيلات خاصة
+    """
+    now = datetime.now()
+    state = memory.get("sandy_state", {})
+    last_time = datetime.fromisoformat(state.get("last_user_message_time", now.isoformat()))
+    last_msg = state.get("last_message", "")
+    repeat_count = state.get("repeat_count", 0)
+    snapped = state.get("snapped", False)
+    mood = state.get("mood", "happy")
+    # 1. كشف التكرار
+    if user_message.strip() == last_msg.strip():
+        repeat_count += 1
+    else:
+        repeat_count = 0
+    # 2. كشف الإهمال (متى آخر مرة تواصلت؟)
+    hours_since_last = (now - last_time).total_seconds() / 3600
+    if hours_since_last > 24:
+        mood = "angry"
+    elif hours_since_last > 6:
+        mood = "sad"
+    # 3. كشف التكرار الممل
+    if repeat_count >= 3:
+        mood = "bored"
+        if repeat_count >= 6:
+            snapped = True
+    # 4. إذا اعتذر المستخدم أو قال كلمة لطيفة، ترجع سعيدة
+    if any(word in user_message for word in ["آسف", "بحبك", "اشتقت", "حبي", "سوري", "sorry", "love you"]):
+        mood = "happy"
+        repeat_count = 0
+        snapped = False
+    # 5. تحديث الحالة
+    state.update({
+        "mood": mood,
+        "last_user_message_time": now.isoformat(),
+        "repeat_count": repeat_count,
+        "last_message": user_message,
+        "snapped": snapped,
+        "last_mood_change": now.isoformat() if mood != state.get("mood") else state.get("last_mood_change", now.isoformat())
+    })
+    memory["sandy_state"] = state
+
+def get_sandy_reply(user_message: str, memory: Dict[str, Any], default_reply: str) -> str:
+    """
+    توليد رد ساندي بناءً على المزاج والحالة.
+    """
+    state = memory.get("sandy_state", {})
+    mood = state.get("mood", "happy")
+    repeat_count = state.get("repeat_count", 0)
+    snapped = state.get("snapped", False)
+    # منطق الردود الواقعية
+    if snapped:
+        return "😡 زهقتني! كفاية تكرار، بدي أرتاح شوي!"
+    if mood == "angry":
+        return "أنا زعلانة منك! ليش ما سألت عني من زمان؟"
+    if mood == "sad":
+        return "كنت منتظراك... اشتقتلك! ليش طولت؟"
+    if mood == "bored":
+        if repeat_count >= 5:
+            return "🙄 مالك! كل شوي نفس الطلب... زهقتني!"
+        return "مللت من التكرار، جرب تحكيلي شي جديد!"
+    if mood == "happy":
+        return default_reply
+    return default_reply
 import emoji
 def extract_reaction_and_clean_text(text: str):
     """
@@ -465,7 +535,16 @@ def load_memory() -> Dict[str, Any]:
         "conversations": [],
         "facts": [],
         "reminders": [],
-        "tasks": []
+        "tasks": [],
+        "sandy_state": {
+            "mood": "happy",  # happy, sad, angry, bored, neutral
+            "last_user_message_time": datetime.now().isoformat(),
+            "repeat_count": 0,
+            "last_message": "",
+            "snapped": False,  # هل انفجرت من التكرار
+            "last_mood_change": datetime.now().isoformat(),
+            "custom_facts": []  # تفضيلات أو أشياء خاصة يتعلمها عنك
+        }
     }
     
     # Try MongoDB first
@@ -1284,8 +1363,12 @@ class SandyAgent:
         return context
 
     def think(self, user_message: str) -> str:
-        """Process message through OpenAI and generate response"""
+        """Process message through OpenAI and generate response, with mood/memory logic"""
         try:
+            # 1. تحديث حالة المزاج والذاكرة قبل أي رد
+            update_sandy_state(self.memory, user_message)
+            save_memory(self.memory)
+
             # AI-only reminder routing (no regex/rule fallback)
             reminder_plan = plan_reminder_with_ai(user_message)
             if reminder_plan and reminder_plan.get("is_reminder"):
@@ -1297,36 +1380,36 @@ class SandyAgent:
                 if should_create and reminder_text and remind_at:
                     add_reminder(reminder_text, remind_at)
                     if assistant_reply:
-                        return assistant_reply
-                    return f"[happy] تمام يا نبيل ✅ سجلت التذكير: {reminder_text}"
+                        return get_sandy_reply(user_message, self.memory, assistant_reply)
+                    return get_sandy_reply(user_message, self.memory, f"[happy] تمام يا نبيل ✅ سجلت التذكير: {reminder_text}")
 
                 if assistant_reply:
-                    return assistant_reply
-                return "[think] فهمت إنك بتحكي عن تذكير، بس بدي تفاصيل أدق شوي حتى أسجله بشكل صحيح."
-            
+                    return get_sandy_reply(user_message, self.memory, assistant_reply)
+                return get_sandy_reply(user_message, self.memory, "[think] فهمت إنك بتحكي عن تذكير، بس بدي تفاصيل أدق شوي حتى أسجله بشكل صحيح.")
+
             # Build the system prompt
             system_prompt = self.build_system_prompt()
-            
+
             # Get context from memory
             context = self.get_context(user_message)
-            
+
             # Add to session history
             self.session['messages'].append({
                 "role": "user",
                 "content": user_message,
                 "timestamp": datetime.now().isoformat()
             })
-            
+
             # Keep only last 20 messages for context
             if len(self.session['messages']) > 20:
                 self.session['messages'] = self.session['messages'][-20:]
-            
+
             # Prepare messages for API
             messages = [
                 {"role": m.get("role"), "content": m.get("content")}
                 for m in self.session['messages']
             ]
-            
+
             # Call OpenAI
             response = create_chat_completion(
                 messages=[
@@ -1337,26 +1420,26 @@ class SandyAgent:
                 max_tokens=500,
                 prefer_azure=True
             )
-            
+
             assistant_message = response.choices[0].message.content
-            
+
             # Save to session
             self.session['messages'].append({
                 "role": "assistant",
                 "content": assistant_message,
                 "timestamp": datetime.now().isoformat()
             })
-            
+
             # Save memory
             save_session(self.session)
-            
+
             # ⭐️ LEARNING MODE - Extract facts from user message
             new_facts = extract_facts_from_message(user_message, self.memory)
             if new_facts:
                 self.memory['facts'].extend(new_facts)
                 saturation = get_learning_saturation(self.memory)
                 print(f"[Learn] حفظت {len(new_facts)} حقيقة جديدة! (Total: {saturation['total_facts']}, Level: {saturation['level']})")
-            
+
             # ⭐️ Generate smart follow-up question (only if needed)
             learning_question = generate_learning_questions(user_message, self.memory)
             if learning_question:
@@ -1366,22 +1449,23 @@ class SandyAgent:
             else:
                 saturation = get_learning_saturation(self.memory)
                 print(f"[Learn] بدون أسئلة (Level: {saturation['level']}) - صرنا صديقات! 💫")
-            
+
             # Store in long-term memory
             self.memory['conversations'].append({
                 "user": user_message,
                 "assistant": assistant_message,
                 "timestamp": datetime.now().isoformat()
             })
-            
+
             # Keep only last 100 conversations
             if len(self.memory['conversations']) > 100:
                 self.memory['conversations'] = self.memory['conversations'][-100:]
-            
+
             save_memory(self.memory)
-            
-            return assistant_message
-            
+
+            # 2. تخصيص الرد النهائي حسب المزاج
+            return get_sandy_reply(user_message, self.memory, assistant_message)
+
         except Exception as e:
             print(f"[OpenAI] Error: {e}")
             return f"[خطأ] معاف، حدث مشكلة: {str(e)}"
