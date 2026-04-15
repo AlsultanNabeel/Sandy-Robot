@@ -12,7 +12,7 @@ import threading
 import re
 import atexit
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
@@ -205,7 +205,7 @@ def acquire_polling_leader_lock() -> bool:
         print("[Lock] ⚠️ Mongo lock unavailable, proceeding without distributed lock")
         return True
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=POLLING_LOCK_TTL_SECONDS)
     try:
         doc = mongo_db['locks'].find_one_and_update(
@@ -243,7 +243,7 @@ def refresh_polling_leader_lock() -> bool:
     """Extend lock TTL while this instance is actively polling."""
     if mongo_db is None:
         return True
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     expires_at = now + timedelta(seconds=POLLING_LOCK_TTL_SECONDS)
     try:
         result = mongo_db['locks'].update_one(
@@ -1339,8 +1339,24 @@ def main():
 
     start_polling_lock_heartbeat()
 
-    # Start polling
-    telegram_bot.infinity_polling(skip_pending=True, timeout=30, long_polling_timeout=30)
+    # Start polling with retry loop to survive transient Telegram 409 conflicts.
+    while True:
+        try:
+            telegram_bot.infinity_polling(
+                skip_pending=False,
+                timeout=30,
+                long_polling_timeout=30,
+                allowed_updates=["message"]
+            )
+        except Exception as e:
+            msg = str(e)
+            if "Error code: 409" in msg or "terminated by other getUpdates request" in msg:
+                print("[Telegram] ⚠️ Polling conflict (409). Retrying in 5s...")
+                time.sleep(5)
+                continue
+
+            print(f"[Telegram] ❌ Polling crashed: {e}")
+            time.sleep(3)
 
 if __name__ == "__main__":
     main()
