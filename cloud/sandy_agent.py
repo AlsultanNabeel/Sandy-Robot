@@ -1,3 +1,4 @@
+from typing import Dict, Any
 # ========== SANDY PERSONALITY ENGINE ==========
 def update_sandy_state(memory: Dict[str, Any], user_message: str) -> None:
     """
