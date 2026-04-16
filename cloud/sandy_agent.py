@@ -8,30 +8,36 @@ except ImportError:
     GOOGLE_TTS_AVAILABLE = False
     print("[Warning] Google Cloud Text-to-Speech not available. To enable: pip install google-cloud-texttospeech")
 def synthesize_voice_with_google(text: str) -> Optional[bytes]:
-    """Synthesize speech with Google Cloud TTS (Sulafat) and return WAV bytes. Returns None on failure."""
+    """Synthesize speech with Google Cloud TTS using env-configured voice and return audio bytes."""
     if not text or not GOOGLE_TTS_AVAILABLE:
         return None
+
     try:
         client = texttospeech.TextToSpeechClient()
         synthesis_input = texttospeech.SynthesisInput(text=text)
+
         voice = texttospeech.VoiceSelectionParams(
-            language_code="ar-XA",
-            name="ar-XA-Wavenet-C",  # Sulafat (أنثى)
-            ssml_gender=texttospeech.SsmlVoiceGender.FEMALE
+            language_code=GOOGLE_TTS_LANGUAGE_CODE,
+            name=GOOGLE_TTS_VOICE,
+            ssml_gender=texttospeech.SsmlVoiceGender.FEMALE,
         )
+
         audio_config = texttospeech.AudioConfig(
             audio_encoding=texttospeech.AudioEncoding.LINEAR16
         )
+
         response = client.synthesize_speech(
             input=synthesis_input,
             voice=voice,
-            audio_config=audio_config
+            audio_config=audio_config,
         )
+
         return response.audio_content
+
     except Exception as e:
         print(f"[Google TTS] ❌ Error: {e}")
         return None
-from typing import Any, Dict, List, Optional
+    
 # ========== SANDY PERSONALITY ENGINE ==========
 def update_sandy_state(memory: Dict[str, Any], user_message: str) -> None:
     """
@@ -176,9 +182,16 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # Try to load .env locally (for development)
 try:
+    # أولاً حمّل من جذر المشروع (الأولوية للجذر)
+    load_dotenv(BASE_DIR.parent / ".env")
+    # ثم حمّل من مجلد cloud/ إذا وجد (يسمح بالكتابة فوق)
     load_dotenv(BASE_DIR / ".env")
-except:
+except Exception:
     pass
+
+# تحديد وضع التشغيل بناءً على متغير صريح
+APP_ENV = os.getenv("APP_ENV", "prod").lower()  # "local" أو "prod"
+RUN_MODE = os.getenv("RUN_MODE", "webhook").lower()  # "polling" أو "webhook"
 
 # Data directories
 DATA_DIR = BASE_DIR.parent / "data"
@@ -192,6 +205,10 @@ TASKS_DIR.mkdir(parents=True, exist_ok=True)
 # OpenAI Configuration (read from environment variables)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
+
+# Google Cloud TTS Configuration
+GOOGLE_TTS_VOICE = os.getenv("GOOGLE_TTS_VOICE", "ar-XA-Chirp3-HD-Sulafat").strip()
+GOOGLE_TTS_LANGUAGE_CODE = os.getenv("GOOGLE_TTS_LANGUAGE_CODE", "ar-XA").strip()
 
 # Azure OpenAI Configuration
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
@@ -397,46 +414,7 @@ def transcribe_audio_with_azure(audio_bytes: bytes, file_name: str = "voice.ogg"
                 pass
     return None
 
-def synthesize_voice_with_azure(text: str) -> Optional[bytes]:
-    """Synthesize speech with Azure Speech and return WAV bytes."""
-    if not text:
-        return None
-    if not AZURE_SPEECH_AVAILABLE or not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
-        print("[Azure TTS] ⚠️ Speech SDK/key/region not configured")
-        return None
 
-    temp_path = None
-    try:
-        speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
-        speech_config.speech_synthesis_voice_name = AZURE_SPEECH_VOICE
-        # أعلى جودة متاحة: 48Khz/192Kbps Mono PCM
-        speech_config.set_speech_synthesis_output_format(
-            speechsdk.SpeechSynthesisOutputFormat.Audio48Khz96KBitRateMonoPcm
-        )
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            temp_path = tmp.name
-
-        audio_config = speechsdk.audio.AudioOutputConfig(filename=temp_path)
-        synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
-        result = synthesizer.speak_text_async(text).get()
-
-        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted and Path(temp_path).exists():
-            with open(temp_path, "rb") as f:
-                audio_bytes = f.read()
-            print("[Azure TTS] ✅ Voice generated (48Khz/192Kbps)")
-            return audio_bytes
-
-        print(f"[Azure TTS] ❌ Synthesis failed: {result.reason}")
-    except Exception as e:
-        print(f"[Azure TTS] ❌ Error: {e}")
-    finally:
-        if temp_path and Path(temp_path).exists():
-            try:
-                Path(temp_path).unlink()
-            except Exception:
-                pass
-    return None
 
 def analyze_image_with_azure(image_bytes: bytes, prompt: str) -> str:
     """Analyze image bytes using Azure/OpenAI multimodal chat."""
@@ -1868,24 +1846,73 @@ def main():
     print("[Status] Ready! Listening for messages...")
     print("=" * 60)
 
-    prepare_telegram_polling()
+    # منطق التشغيل الجديد بناءً على APP_ENV أو RUN_MODE
+    if APP_ENV == "local" or RUN_MODE == "polling":
+        print("[Mode] Local development: Telegram polling mode (APP_ENV=local or RUN_MODE=polling)")
+        # تجاهل RAILWAY_URL تمامًا في الوضع المحلي
+        def prepare_telegram_polling():
+            try:
+                telegram_bot.remove_webhook()
+                print("[Telegram] Webhook removed for local polling mode.")
+            except Exception as e:
+                print(f"[Telegram] Failed to remove webhook: {e}")
+        prepare_telegram_polling()
+        while True:
+            try:
+                telegram_bot.infinity_polling(
+                    skip_pending=False,
+                    timeout=30,
+                    long_polling_timeout=30,
+                    allowed_updates=["message"]
+                )
+            except Exception as e:
+                msg = str(e)
+                if "Error code: 409" in msg or "terminated by other getUpdates request" in msg:
+                    print("[Telegram] ⚠️ Polling conflict (409). Retrying in 5s...")
+                else:
+                    print(f"[Telegram] ❌ Polling crashed: {e}")
+            time.sleep(5)
+    # ========== AZURE TTS FALLBACK ==========
+    def synthesize_voice_with_azure(text: str) -> Optional[bytes]:
+        """Synthesize speech with Azure Speech and return WAV bytes."""
+        if not text:
+            return None
+        if not AZURE_SPEECH_AVAILABLE or not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
+            print("[Azure TTS] ⚠️ Speech SDK/key/region not configured")
+            return None
 
-    while True:
+        temp_path = None
         try:
-            telegram_bot.infinity_polling(
-                skip_pending=False,
-                timeout=30,
-                long_polling_timeout=30,
-                allowed_updates=["message"]
+            speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
+            speech_config.speech_synthesis_voice_name = AZURE_SPEECH_VOICE
+            # أعلى جودة متاحة: 48Khz/192Kbps Mono PCM
+            speech_config.set_speech_synthesis_output_format(
+                speechsdk.SpeechSynthesisOutputFormat.Audio48Khz96KBitRateMonoPcm
             )
-        except Exception as e:
-            msg = str(e)
-            if "Error code: 409" in msg or "terminated by other getUpdates request" in msg:
-                print("[Telegram] ⚠️ Polling conflict (409). Retrying in 5s...")
-            else:
-                print(f"[Telegram] ❌ Polling crashed: {e}")
 
-        time.sleep(5)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+                temp_path = tmp.name
+
+            audio_config = speechsdk.audio.AudioOutputConfig(filename=temp_path)
+            synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
+            result = synthesizer.speak_text_async(text).get()
+
+            if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted and Path(temp_path).exists():
+                with open(temp_path, "rb") as f:
+                    audio_bytes = f.read()
+                print("[Azure TTS] ✅ Voice generated (48Khz/192Kbps)")
+                return audio_bytes
+
+            print(f"[Azure TTS] ❌ Synthesis failed: {result.reason}")
+        except Exception as e:
+            print(f"[Azure TTS] ❌ Error: {e}")
+        finally:
+            if temp_path and Path(temp_path).exists():
+                try:
+                    Path(temp_path).unlink()
+                except Exception:
+                    pass
+        return None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1931,6 +1958,11 @@ def set_telegram_webhook():
     )
 
 if __name__ == "__main__":
-    set_telegram_webhook()
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    if APP_ENV == "local" or RUN_MODE == "polling":
+        # لا تستدعي set_telegram_webhook إطلاقًا في الوضع المحلي
+        main()
+    else:
+        # في الإنتاج فقط: استخدم webhook
+        set_telegram_webhook()
+        port = int(os.environ.get("PORT", 8080))
+        app.run(host="0.0.0.0", port=port)
