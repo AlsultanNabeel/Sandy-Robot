@@ -411,7 +411,7 @@ def synthesize_voice_with_azure(text: str) -> Optional[bytes]:
         speech_config.speech_synthesis_voice_name = AZURE_SPEECH_VOICE
         # أعلى جودة متاحة: 48Khz/192Kbps Mono PCM
         speech_config.set_speech_synthesis_output_format(
-            speechsdk.SpeechSynthesisOutputFormat.Audio48Khz192KBitRateMonoPcm
+            speechsdk.SpeechSynthesisOutputFormat.Audio48Khz96KBitRateMonoPcm
         )
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
@@ -547,12 +547,24 @@ def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Opti
             return s
 
     tts_text = remove_emojis(text_without_reaction)
+    print(f"[DEBUG] Trying Google TTS for: {tts_text}")
     audio_bytes = synthesize_voice_with_google(tts_text)
-    if not audio_bytes:
+    if audio_bytes:
+        print("[DEBUG] Google TTS succeeded. Sending Google voice reply.")
+        source = "Google TTS"
+    else:
+        print("[DEBUG] Google TTS failed. Trying Azure TTS...")
         audio_bytes = synthesize_voice_with_azure(tts_text)
+        if audio_bytes:
+            print("[DEBUG] Azure TTS succeeded. Sending Azure voice reply.")
+            source = "Azure TTS"
+        else:
+            print("[DEBUG] Both Google and Azure TTS failed. No voice reply will be sent.")
+            source = None
     if audio_bytes:
         try:
             telegram_bot.send_voice(chat_id, audio_bytes, timeout=120)
+            print(f"[DEBUG] Voice sent via Telegram. Source: {source}")
         except Exception as e:
             print(f"[Telegram] ⚠️ Voice reply failed: {e}")
 
