@@ -1779,6 +1779,7 @@ def handle_voice_or_audio(message):
 def handle_message(message):
     """Handle all messages"""
     try:
+        print(f"[DEBUG] Received message from chat_id: {message.chat.id}")
         if _is_duplicate_telegram_message(message):
             print(f"[Telegram] Duplicate ignored: chat={message.chat.id}, msg={message.message_id}")
             return
