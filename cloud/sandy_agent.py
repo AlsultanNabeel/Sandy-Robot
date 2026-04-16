@@ -87,14 +87,19 @@ def synthesize_voice_with_google(text: str, mood: str = "neutral", style: str = 
 
         selected_voice = MOOD_TTS_VOICES.get(mood, GOOGLE_TTS_VOICE)
 
-        if style == "romantic" and mood in ["happy", "neutral"]:
+        if style == "romantic":
             selected_voice = MOOD_TTS_VOICES.get("romantic", selected_voice)
-        elif style == "caring" and mood in ["sad", "angry"]:
-            selected_voice = MOOD_TTS_VOICES.get("sad", selected_voice)
+        elif style == "caring":
+            if mood in ["sad", "angry", "neutral"]:
+                selected_voice = MOOD_TTS_VOICES.get("sad", selected_voice)
         elif style == "serious":
             selected_voice = MOOD_TTS_VOICES.get("serious", selected_voice)
         elif style == "excited":
             selected_voice = MOOD_TTS_VOICES.get("excited", selected_voice)
+        elif style == "shy":
+            selected_voice = MOOD_TTS_VOICES.get("shy", selected_voice)
+        elif style == "playful":
+            selected_voice = MOOD_TTS_VOICES.get("happy", selected_voice)
 
         print(f"[Google TTS] Using mood='{mood}' voice='{selected_voice}'")
 
@@ -122,58 +127,169 @@ def synthesize_voice_with_google(text: str, mood: str = "neutral", style: str = 
 
 
 # ========== SANDY PERSONALITY ENGINE ==========
+def infer_mood_and_style_from_ai(user_message: str, memory: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Let AI infer Sandy's mood/style from the full user message context.
+    Returns:
+    {
+        "mood": "...",
+        "style": "...",
+        "directed_at_sandy": true/false,
+        "confidence": 0.0-1.0
+    }
+    """
+    try:
+        previous_state = memory.get("sandy_state", {})
+        previous_mood = previous_state.get("mood", "neutral")
+
+        response = create_chat_completion(
+            temperature=0,
+            max_tokens=180,
+            response_format={"type": "json_object"},
+            prefer_azure=True,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an emotion/context classifier for Sandy, an assistant with memory and personality. "
+                        "Analyze the FULL meaning of the user's message, not just keywords. "
+                        "Return strict JSON only with fields: "
+                        "mood, style, directed_at_sandy, confidence. "
+                        "Allowed moods: happy, sad, angry, bored, neutral, excited, romantic, shy, tired, serious. "
+                        "Allowed styles: normal, caring, romantic, playful, serious, excited, shy. "
+                        "Rules: "
+                        "1) If the user is telling a story about something else, do NOT treat it as directly addressed to Sandy. "
+                        "2) If words like 'sorry' or 'I love you' appear inside a story, do not automatically map them to caring/romantic unless clearly addressed to Sandy. "
+                        "3) Prefer the OVERALL emotional meaning of the message. "
+                        "4) Return only JSON."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"previous_mood={previous_mood}\n"
+                        f"user_message={user_message}"
+                    )
+                }
+            ]
+        )
+
+        payload = json.loads(response.choices[0].message.content or "{}")
+
+        mood = str(payload.get("mood", "neutral")).strip().lower()
+        style = str(payload.get("style", "normal")).strip().lower()
+        directed_at_sandy = bool(payload.get("directed_at_sandy", False))
+        confidence = float(payload.get("confidence", 0.0) or 0.0)
+
+        allowed_moods = {"happy", "sad", "angry", "bored", "neutral", "excited", "romantic", "shy", "tired", "serious"}
+        allowed_styles = {"normal", "caring", "romantic", "playful", "serious", "excited", "shy"}
+
+        if mood not in allowed_moods:
+            mood = "neutral"
+        if style not in allowed_styles:
+            style = "normal"
+
+        return {
+            "mood": mood,
+            "style": style,
+            "directed_at_sandy": directed_at_sandy,
+            "confidence": confidence
+        }
+
+    except Exception as e:
+        print(f"[MoodAI] ⚠️ Failed to infer mood/style: {e}")
+        return None
+    
 def update_sandy_state(memory: Dict[str, Any], user_message: str) -> None:
     """
-    تحديث مزاج ساندي وحالتها بناءً على تفاعل المستخدم.
-    - تتبع آخر تواصل
-    - كشف التكرار
-    - تغيير المزاج (زعل، ملل، غضب، سعادة)
-    - حفظ تفضيلات خاصة
+    Update Sandy mood/state using AI-first context understanding.
+    Falls back to simple rule-based logic if AI fails.
     """
     now = datetime.now()
     state = memory.get("sandy_state", {})
+
     last_time = datetime.fromisoformat(state.get("last_user_message_time", now.isoformat()))
     last_msg = state.get("last_message", "")
     repeat_count = state.get("repeat_count", 0)
     snapped = state.get("snapped", False)
-    mood = state.get("mood", "happy")
+    previous_mood = state.get("mood", "neutral")
+
+    # Repeat detection
     if user_message.strip() == last_msg.strip():
         repeat_count += 1
     else:
         repeat_count = 0
+        snapped = False
+
+    ai_result = infer_mood_and_style_from_ai(user_message, memory)
+
+    mood = previous_mood
+    style = state.get("style", "normal")
+    directed_at_sandy = False
+
+    if ai_result and ai_result.get("confidence", 0) >= 0.65:
+        mood = ai_result.get("mood", "neutral")
+        style = ai_result.get("style", "normal")
+        directed_at_sandy = ai_result.get("directed_at_sandy", False)
+    else:
+        # Fallback logic فقط إذا AI فشل
         hours_since_last = (now - last_time).total_seconds() / 3600
+
+        lowered_message = (user_message or "").lower()
+
         if hours_since_last > 24:
             mood = "angry"
         elif hours_since_last > 6:
             mood = "sad"
         else:
+            mood = "neutral"
+
+        style = "normal"
+
+        if any(word in lowered_message for word in ["واو", "رائع", "روعة", "متحمس", "متحمسة", "مبسوطة", "مبسوط", "excited"]):
+            mood = "excited"
+            style = "excited"
+
+        elif any(word in lowered_message for word in ["بحبك", "اشتقت", "حبي", "love you", "missed you"]):
+            mood = "romantic"
+            style = "romantic"
+            directed_at_sandy = True
+
+        elif any(word in lowered_message for word in ["آسف", "سوري", "sorry"]):
             mood = "happy"
-        snapped = False
+            style = "caring"
+            directed_at_sandy = True
 
-    hours_since_last = (now - last_time).total_seconds() / 3600
-    if hours_since_last > 24:
-        mood = "angry"
-    elif hours_since_last > 6:
-        mood = "sad"
+        elif any(word in lowered_message for word in ["استحيت", "محرج", "خجلان", "خجلانة", "shy"]):
+            mood = "shy"
+            style = "shy"
 
-    if repeat_count >= 3:
+        elif any(word in lowered_message for word in ["تعبان", "تعبانة", "نعسان", "نعسانة", "مرهق", "مرهقة", "tired"]):
+            mood = "tired"
+            style = "normal"
+
+        elif any(word in lowered_message for word in ["ركز", "مهم", "بسرعة", "رسمي", "جاد", "serious"]):
+            mood = "serious"
+            style = "serious"
+
+    # Repetition override
+    if repeat_count >= 3 and mood not in ["romantic", "excited"]:
         mood = "bored"
+        style = "serious"
         if repeat_count >= 6:
             snapped = True
 
-    if any(word in user_message for word in ["آسف", "بحبك", "اشتقت", "حبي", "سوري", "sorry", "love you"]):
-        mood = "happy"
-        repeat_count = 0
-        snapped = False
-
     state.update({
         "mood": mood,
+        "style": style,
+        "directed_at_sandy": directed_at_sandy,
         "last_user_message_time": now.isoformat(),
         "repeat_count": repeat_count,
         "last_message": user_message,
         "snapped": snapped,
-        "last_mood_change": now.isoformat() if mood != state.get("mood") else state.get("last_mood_change", now.isoformat())
+        "last_mood_change": now.isoformat() if mood != previous_mood else state.get("last_mood_change", now.isoformat())
     })
+
     memory["sandy_state"] = state
 
 
@@ -570,22 +686,7 @@ def extract_image_prompt(message: str) -> str:
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-def detect_voice_style(text: str) -> str:
-    text = (text or "").strip().lower()
 
-    if any(word in text for word in ["بحبك", "اشتقت", "حبيبتي", "يا روحي", "love"]):
-        return "romantic"
-
-    if any(word in text for word in ["آسف", "اسف", "سوري", "sorry"]):
-        return "caring"
-
-    if any(word in text for word in ["بسرعة", "ركز", "شو صار", "مهم", "serious"]):
-        return "serious"
-
-    if any(word in text for word in ["واو", "متحمسة", "رائع", "روعه", "مبسوطة"]):
-        return "excited"
-
-    return "normal"
 def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Optional[int] = None):
     """Send text reply and optional Azure-generated voice reply."""
 
@@ -609,9 +710,17 @@ def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Opti
     tts_text = remove_emojis(text_without_reaction)
     print(f"[DEBUG] Trying Google TTS for: {tts_text}")
 
-    current_mood = agent.memory.get("sandy_state", {}).get("mood", "neutral")
-    current_style = detect_voice_style(text_without_reaction)
-    audio_bytes = synthesize_voice_with_google(tts_text, mood=current_mood, style=current_style)
+    current_state = agent.memory.get("sandy_state", {})
+    current_mood = current_state.get("mood", "neutral")
+    current_style = current_state.get("style", "normal")
+
+    print(f"[DEBUG] Voice mood='{current_mood}' style='{current_style}'")
+
+    audio_bytes = synthesize_voice_with_google(
+        tts_text,
+        mood=current_mood,
+        style=current_style
+    )
 
     if audio_bytes:
         print("[DEBUG] Google TTS succeeded. Sending Google voice reply.")
