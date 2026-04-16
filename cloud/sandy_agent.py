@@ -30,7 +30,7 @@ def synthesize_voice_with_google(text: str) -> Optional[bytes]:
     except Exception as e:
         print(f"[Google TTS] ❌ Error: {e}")
         return None
-from typing import Dict, Any
+from typing import Any, Dict, List, Optional
 # ========== SANDY PERSONALITY ENGINE ==========
 def update_sandy_state(memory: Dict[str, Any], user_message: str) -> None:
     """
