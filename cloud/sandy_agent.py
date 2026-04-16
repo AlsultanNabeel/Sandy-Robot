@@ -1,3 +1,4 @@
+from typing import Any, Dict, List, Optional
 # Try to import Google Cloud Text-to-Speech
 try:
     from google.cloud import texttospeech
