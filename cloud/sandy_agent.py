@@ -1,120 +1,3 @@
-from typing import Any, Dict, List, Optional
-# Try to import Google Cloud Text-to-Speech
-try:
-    from google.cloud import texttospeech
-    GOOGLE_TTS_AVAILABLE = True
-except ImportError:
-    texttospeech = None
-    GOOGLE_TTS_AVAILABLE = False
-    print("[Warning] Google Cloud Text-to-Speech not available. To enable: pip install google-cloud-texttospeech")
-def synthesize_voice_with_google(text: str) -> Optional[bytes]:
-    """Synthesize speech with Google Cloud TTS using env-configured voice and return audio bytes."""
-    if not text or not GOOGLE_TTS_AVAILABLE:
-        return None
-
-    try:
-        client = texttospeech.TextToSpeechClient()
-        synthesis_input = texttospeech.SynthesisInput(text=text)
-
-        voice = texttospeech.VoiceSelectionParams(
-            language_code=GOOGLE_TTS_LANGUAGE_CODE,
-            name=GOOGLE_TTS_VOICE,
-            ssml_gender=texttospeech.SsmlVoiceGender.FEMALE,
-        )
-
-        audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.LINEAR16
-        )
-
-        response = client.synthesize_speech(
-            input=synthesis_input,
-            voice=voice,
-            audio_config=audio_config,
-        )
-
-        return response.audio_content
-
-    except Exception as e:
-        print(f"[Google TTS] ❌ Error: {e}")
-        return None
-    
-# ========== SANDY PERSONALITY ENGINE ==========
-def update_sandy_state(memory: Dict[str, Any], user_message: str) -> None:
-    """
-    تحديث مزاج ساندي وحالتها بناءً على تفاعل المستخدم.
-    - تتبع آخر تواصل
-    - كشف التكرار
-    - تغيير المزاج (زعل، ملل، غضب، سعادة)
-    - حفظ تفضيلات خاصة
-    """
-    now = datetime.now()
-    state = memory.get("sandy_state", {})
-    last_time = datetime.fromisoformat(state.get("last_user_message_time", now.isoformat()))
-    last_msg = state.get("last_message", "")
-    repeat_count = state.get("repeat_count", 0)
-    snapped = state.get("snapped", False)
-    mood = state.get("mood", "happy")
-    # 1. كشف التكرار
-    if user_message.strip() == last_msg.strip():
-        repeat_count += 1
-    else:
-        repeat_count = 0
-        # إذا أرسل المستخدم رسالة مختلفة، المزاج يعود للسعادة إلا إذا كان هناك سبب آخر (زعل بسبب الإهمال)
-        hours_since_last = (now - last_time).total_seconds() / 3600
-        if hours_since_last > 24:
-            mood = "angry"
-        elif hours_since_last > 6:
-            mood = "sad"
-        else:
-            mood = "happy"
-        snapped = False
-    # 2. كشف الإهمال (متى آخر مرة تواصلت؟)
-    hours_since_last = (now - last_time).total_seconds() / 3600
-    if hours_since_last > 24:
-        mood = "angry"
-    elif hours_since_last > 6:
-        mood = "sad"
-    # 3. كشف التكرار الممل
-    if repeat_count >= 3:
-        mood = "bored"
-        if repeat_count >= 6:
-            snapped = True
-    # 4. إذا اعتذر المستخدم أو قال كلمة لطيفة، ترجع سعيدة
-    if any(word in user_message for word in ["آسف", "بحبك", "اشتقت", "حبي", "سوري", "sorry", "love you"]):
-        mood = "happy"
-        repeat_count = 0
-        snapped = False
-    # 5. تحديث الحالة
-    state.update({
-        "mood": mood,
-        "last_user_message_time": now.isoformat(),
-        "repeat_count": repeat_count,
-        "last_message": user_message,
-        "snapped": snapped,
-        "last_mood_change": now.isoformat() if mood != state.get("mood") else state.get("last_mood_change", now.isoformat())
-    })
-    memory["sandy_state"] = state
-
-def get_sandy_reply(user_message: str, memory: Dict[str, Any], default_reply: str) -> str:
-    """
-    توليد رد ساندي بناءً على المزاج والحالة.
-    """
-    # الردود الثابتة أُزيلت، دائماً استخدم رد الذكاء الاصطناعي المولد حسب المزاج
-    return default_reply
-import emoji
-def extract_reaction_and_clean_text(text: str):
-    """
-    استخراج الرياكشن (مثل [happy]) من بداية الرد، وحفظه في متغير منفصل.
-    هذا المتغير مهم لتمريره للهاردوير (الشاشة) مستقبلاً.
-    يرجع (reaction, text_without_reaction)
-    """
-    reaction = None
-    cleaned = text.strip()
-    match = re.match(r"^\[([a-zA-Z_]+)\]\s*", cleaned)
-    if match:
-        reaction = match.group(1)
-        cleaned = cleaned[match.end():].strip()
-    return reaction, cleaned
 #!/usr/bin/env python3
 """
 Sandy Agent - 24/7 Intelligent Assistant on Railway
@@ -130,12 +13,12 @@ import re
 import io
 import base64
 import tempfile
+import requests
 from collections import deque
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
-import os
 from openai import OpenAI, AzureOpenAI
 import telebot
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -167,6 +50,154 @@ except ImportError:
     speechsdk = None
     AZURE_SPEECH_AVAILABLE = False
     print("[Warning] Azure Speech SDK not available. To enable: pip install azure-cognitiveservices-speech")
+
+
+# Try to import Google Cloud Text-to-Speech
+try:
+    from google.cloud import texttospeech
+    GOOGLE_TTS_AVAILABLE = True
+except ImportError:
+    texttospeech = None
+    GOOGLE_TTS_AVAILABLE = False
+    print("[Warning] Google Cloud Text-to-Speech not available. To enable: pip install google-cloud-texttospeech")
+
+
+GOOGLE_TTS_VOICE = os.getenv("GOOGLE_TTS_VOICE", "ar-XA-Chirp3-HD-Sulafat").strip()
+GOOGLE_TTS_LANGUAGE_CODE = os.getenv("GOOGLE_TTS_LANGUAGE_CODE", "ar-XA").strip()
+MOOD_TTS_VOICES = {
+    "happy": os.getenv("GOOGLE_TTS_VOICE_HAPPY", "ar-XA-Chirp3-HD-Sulafat").strip(),
+    "sad": os.getenv("GOOGLE_TTS_VOICE_SAD", "ar-XA-Chirp3-HD-Zephyr").strip(),
+    "angry": os.getenv("GOOGLE_TTS_VOICE_ANGRY", "ar-XA-Chirp3-HD-Despina").strip(),
+    "bored": os.getenv("GOOGLE_TTS_VOICE_BORED", "ar-XA-Chirp3-HD-Aoede").strip(),
+    "neutral": os.getenv("GOOGLE_TTS_VOICE_NEUTRAL", "ar-XA-Chirp3-HD-Sulafat").strip(),
+    "excited": os.getenv("GOOGLE_TTS_VOICE_EXCITED", "ar-XA-Chirp3-HD-Vindemiatrix").strip(),
+    "romantic": os.getenv("GOOGLE_TTS_VOICE_ROMANTIC", "ar-XA-Chirp3-HD-Sulafat").strip(),
+    "shy": os.getenv("GOOGLE_TTS_VOICE_SHY", "ar-XA-Chirp3-HD-Zephyr").strip(),
+    "tired": os.getenv("GOOGLE_TTS_VOICE_TIRED", "ar-XA-Chirp3-HD-Aoede").strip(),
+    "serious": os.getenv("GOOGLE_TTS_VOICE_SERIOUS", "ar-XA-Chirp3-HD-Despina").strip(),
+}
+def synthesize_voice_with_google(text: str, mood: str = "neutral", style: str = "normal") -> Optional[bytes]:
+    """Synthesize speech with Google Cloud TTS using env-configured voice and return audio bytes."""
+    if not text or not GOOGLE_TTS_AVAILABLE:
+        return None
+
+    try:
+        client = texttospeech.TextToSpeechClient()
+        synthesis_input = texttospeech.SynthesisInput(text=text)
+
+        selected_voice = MOOD_TTS_VOICES.get(mood, GOOGLE_TTS_VOICE)
+
+        if style == "romantic" and mood in ["happy", "neutral"]:
+            selected_voice = MOOD_TTS_VOICES.get("romantic", selected_voice)
+        elif style == "caring" and mood in ["sad", "angry"]:
+            selected_voice = MOOD_TTS_VOICES.get("sad", selected_voice)
+        elif style == "serious":
+            selected_voice = MOOD_TTS_VOICES.get("serious", selected_voice)
+        elif style == "excited":
+            selected_voice = MOOD_TTS_VOICES.get("excited", selected_voice)
+
+        print(f"[Google TTS] Using mood='{mood}' voice='{selected_voice}'")
+
+        voice = texttospeech.VoiceSelectionParams(
+            language_code=GOOGLE_TTS_LANGUAGE_CODE,
+            name=selected_voice,
+            ssml_gender=texttospeech.SsmlVoiceGender.FEMALE,
+        )
+
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.LINEAR16
+        )
+
+        response = client.synthesize_speech(
+            input=synthesis_input,
+            voice=voice,
+            audio_config=audio_config,
+        )
+
+        return response.audio_content
+
+    except Exception as e:
+        print(f"[Google TTS] ❌ Error: {e}")
+        return None
+
+
+# ========== SANDY PERSONALITY ENGINE ==========
+def update_sandy_state(memory: Dict[str, Any], user_message: str) -> None:
+    """
+    تحديث مزاج ساندي وحالتها بناءً على تفاعل المستخدم.
+    - تتبع آخر تواصل
+    - كشف التكرار
+    - تغيير المزاج (زعل، ملل، غضب، سعادة)
+    - حفظ تفضيلات خاصة
+    """
+    now = datetime.now()
+    state = memory.get("sandy_state", {})
+    last_time = datetime.fromisoformat(state.get("last_user_message_time", now.isoformat()))
+    last_msg = state.get("last_message", "")
+    repeat_count = state.get("repeat_count", 0)
+    snapped = state.get("snapped", False)
+    mood = state.get("mood", "happy")
+    if user_message.strip() == last_msg.strip():
+        repeat_count += 1
+    else:
+        repeat_count = 0
+        hours_since_last = (now - last_time).total_seconds() / 3600
+        if hours_since_last > 24:
+            mood = "angry"
+        elif hours_since_last > 6:
+            mood = "sad"
+        else:
+            mood = "happy"
+        snapped = False
+
+    hours_since_last = (now - last_time).total_seconds() / 3600
+    if hours_since_last > 24:
+        mood = "angry"
+    elif hours_since_last > 6:
+        mood = "sad"
+
+    if repeat_count >= 3:
+        mood = "bored"
+        if repeat_count >= 6:
+            snapped = True
+
+    if any(word in user_message for word in ["آسف", "بحبك", "اشتقت", "حبي", "سوري", "sorry", "love you"]):
+        mood = "happy"
+        repeat_count = 0
+        snapped = False
+
+    state.update({
+        "mood": mood,
+        "last_user_message_time": now.isoformat(),
+        "repeat_count": repeat_count,
+        "last_message": user_message,
+        "snapped": snapped,
+        "last_mood_change": now.isoformat() if mood != state.get("mood") else state.get("last_mood_change", now.isoformat())
+    })
+    memory["sandy_state"] = state
+
+
+def get_sandy_reply(user_message: str, memory: Dict[str, Any], default_reply: str) -> str:
+    """توليد رد ساندي بناءً على المزاج والحالة."""
+    return default_reply
+
+
+import emoji
+
+
+def extract_reaction_and_clean_text(text: str):
+    """
+    استخراج الرياكشن (مثل [happy]) من بداية الرد، وحفظه في متغير منفصل.
+    يرجع (reaction, text_without_reaction)
+    """
+    reaction = None
+    cleaned = text.strip()
+    match = re.match(r"^\[([a-zA-Z_]+)\]\s*", cleaned)
+    if match:
+        reaction = match.group(1)
+        cleaned = cleaned[match.end():].strip()
+    return reaction, cleaned
+
 
 # ═══════════════════════════════════════════════════════════
 # CONFIGURATION & ENV SETUP
@@ -205,10 +236,6 @@ TASKS_DIR.mkdir(parents=True, exist_ok=True)
 # OpenAI Configuration (read from environment variables)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o").strip()
-
-# Google Cloud TTS Configuration
-GOOGLE_TTS_VOICE = os.getenv("GOOGLE_TTS_VOICE", "ar-XA-Chirp3-HD-Sulafat").strip()
-GOOGLE_TTS_LANGUAGE_CODE = os.getenv("GOOGLE_TTS_LANGUAGE_CODE", "ar-XA").strip()
 
 # Azure OpenAI Configuration
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "").strip()
@@ -414,7 +441,46 @@ def transcribe_audio_with_azure(audio_bytes: bytes, file_name: str = "voice.ogg"
                 pass
     return None
 
+def synthesize_voice_with_azure(text: str) -> Optional[bytes]:
+    """Synthesize speech with Azure Speech and return WAV bytes."""
+    if not text:
+        return None
+    if not AZURE_SPEECH_AVAILABLE or not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
+        print("[Azure TTS] ⚠️ Speech SDK/key/region not configured")
+        return None
 
+    temp_path = None
+    try:
+        speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
+        speech_config.speech_synthesis_voice_name = AZURE_SPEECH_VOICE
+        # أعلى جودة متاحة: 48Khz/192Kbps Mono PCM
+        speech_config.set_speech_synthesis_output_format(
+            speechsdk.SpeechSynthesisOutputFormat.Riff16Khz16BitMonoPcm
+        )
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
+            temp_path = tmp.name
+
+        audio_config = speechsdk.audio.AudioOutputConfig(filename=temp_path)
+        synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
+        result = synthesizer.speak_text_async(text).get()
+
+        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted and Path(temp_path).exists():
+            with open(temp_path, "rb") as f:
+                audio_bytes = f.read()
+            print("[Azure TTS] ✅ Voice generated (48Khz/192Kbps)")
+            return audio_bytes
+
+        print(f"[Azure TTS] ❌ Synthesis failed: {result.reason}")
+    except Exception as e:
+        print(f"[Azure TTS] ❌ Error: {e}")
+    finally:
+        if temp_path and Path(temp_path).exists():
+            try:
+                Path(temp_path).unlink()
+            except Exception:
+                pass
+    return None
 
 def analyze_image_with_azure(image_bytes: bytes, prompt: str) -> str:
     """Analyze image bytes using Azure/OpenAI multimodal chat."""
@@ -504,6 +570,22 @@ def extract_image_prompt(message: str) -> str:
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
+def detect_voice_style(text: str) -> str:
+    text = (text or "").strip().lower()
+
+    if any(word in text for word in ["بحبك", "اشتقت", "حبيبتي", "يا روحي", "love"]):
+        return "romantic"
+
+    if any(word in text for word in ["آسف", "اسف", "سوري", "sorry"]):
+        return "caring"
+
+    if any(word in text for word in ["بسرعة", "ركز", "شو صار", "مهم", "serious"]):
+        return "serious"
+
+    if any(word in text for word in ["واو", "متحمسة", "رائع", "روعه", "مبسوطة"]):
+        return "excited"
+
+    return "normal"
 def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Optional[int] = None):
     """Send text reply and optional Azure-generated voice reply."""
 
@@ -526,7 +608,11 @@ def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Opti
 
     tts_text = remove_emojis(text_without_reaction)
     print(f"[DEBUG] Trying Google TTS for: {tts_text}")
-    audio_bytes = synthesize_voice_with_google(tts_text)
+
+    current_mood = agent.memory.get("sandy_state", {}).get("mood", "neutral")
+    current_style = detect_voice_style(text_without_reaction)
+    audio_bytes = synthesize_voice_with_google(tts_text, mood=current_mood, style=current_style)
+
     if audio_bytes:
         print("[DEBUG] Google TTS succeeded. Sending Google voice reply.")
         source = "Google TTS"
@@ -539,6 +625,7 @@ def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Opti
         else:
             print("[DEBUG] Both Google and Azure TTS failed. No voice reply will be sent.")
             source = None
+
     if audio_bytes:
         try:
             telegram_bot.send_voice(chat_id, audio_bytes, timeout=120)
@@ -1832,6 +1919,12 @@ scheduler.add_job(check_reminders, 'interval', minutes=1)
 # ═══════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════
+def prepare_telegram_polling():
+    try:
+        telegram_bot.remove_webhook()
+        print("[Telegram] Webhook removed for local polling mode.")
+    except Exception as e:
+        print(f"[Telegram] Failed to remove webhook: {e}")
 
 def main():
     """Main entry point"""
@@ -1850,12 +1943,6 @@ def main():
     if APP_ENV == "local" or RUN_MODE == "polling":
         print("[Mode] Local development: Telegram polling mode (APP_ENV=local or RUN_MODE=polling)")
         # تجاهل RAILWAY_URL تمامًا في الوضع المحلي
-        def prepare_telegram_polling():
-            try:
-                telegram_bot.remove_webhook()
-                print("[Telegram] Webhook removed for local polling mode.")
-            except Exception as e:
-                print(f"[Telegram] Failed to remove webhook: {e}")
         prepare_telegram_polling()
         while True:
             try:
@@ -1872,47 +1959,9 @@ def main():
                 else:
                     print(f"[Telegram] ❌ Polling crashed: {e}")
             time.sleep(5)
-    # ========== AZURE TTS FALLBACK ==========
-    def synthesize_voice_with_azure(text: str) -> Optional[bytes]:
-        """Synthesize speech with Azure Speech and return WAV bytes."""
-        if not text:
-            return None
-        if not AZURE_SPEECH_AVAILABLE or not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
-            print("[Azure TTS] ⚠️ Speech SDK/key/region not configured")
-            return None
-
-        temp_path = None
-        try:
-            speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
-            speech_config.speech_synthesis_voice_name = AZURE_SPEECH_VOICE
-            # أعلى جودة متاحة: 48Khz/192Kbps Mono PCM
-            speech_config.set_speech_synthesis_output_format(
-                speechsdk.SpeechSynthesisOutputFormat.Audio48Khz96KBitRateMonoPcm
-            )
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-                temp_path = tmp.name
-
-            audio_config = speechsdk.audio.AudioOutputConfig(filename=temp_path)
-            synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
-            result = synthesizer.speak_text_async(text).get()
-
-            if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted and Path(temp_path).exists():
-                with open(temp_path, "rb") as f:
-                    audio_bytes = f.read()
-                print("[Azure TTS] ✅ Voice generated (48Khz/192Kbps)")
-                return audio_bytes
-
-            print(f"[Azure TTS] ❌ Synthesis failed: {result.reason}")
-        except Exception as e:
-            print(f"[Azure TTS] ❌ Error: {e}")
-        finally:
-            if temp_path and Path(temp_path).exists():
-                try:
-                    Path(temp_path).unlink()
-                except Exception:
-                    pass
-        return None
+    else:
+        print("[Mode] Production/Server: Webhook mode (APP_ENV=prod/RUN_MODE=webhook)")
+        # فقط في الإنتاج يستخدم RAILWAY_URL وFlask webhook
 
 
 # ═══════════════════════════════════════════════════════════
