@@ -40,3 +40,6 @@ reminders.json
 .venv
 wake_word_training/
 wake_word_model.pkl
+# Google Cloud credentials (لا ترفع أبداً)
+sandy-gcloud-key.json
+

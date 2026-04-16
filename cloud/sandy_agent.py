@@ -1,3 +1,35 @@
+# Try to import Google Cloud Text-to-Speech
+try:
+    from google.cloud import texttospeech
+    GOOGLE_TTS_AVAILABLE = True
+except ImportError:
+    texttospeech = None
+    GOOGLE_TTS_AVAILABLE = False
+    print("[Warning] Google Cloud Text-to-Speech not available. To enable: pip install google-cloud-texttospeech")
+def synthesize_voice_with_google(text: str) -> Optional[bytes]:
+    """Synthesize speech with Google Cloud TTS (Sulafat) and return WAV bytes. Returns None on failure."""
+    if not text or not GOOGLE_TTS_AVAILABLE:
+        return None
+    try:
+        client = texttospeech.TextToSpeechClient()
+        synthesis_input = texttospeech.SynthesisInput(text=text)
+        voice = texttospeech.VoiceSelectionParams(
+            language_code="ar-XA",
+            name="ar-XA-Wavenet-C",  # Sulafat (أنثى)
+            ssml_gender=texttospeech.SsmlVoiceGender.FEMALE
+        )
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.LINEAR16
+        )
+        response = client.synthesize_speech(
+            input=synthesis_input,
+            voice=voice,
+            audio_config=audio_config
+        )
+        return response.audio_content
+    except Exception as e:
+        print(f"[Google TTS] ❌ Error: {e}")
+        return None
 from typing import Dict, Any
 # ========== SANDY PERSONALITY ENGINE ==========
 def update_sandy_state(memory: Dict[str, Any], user_message: str) -> None:
@@ -96,6 +128,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
+import os
 from openai import OpenAI, AzureOpenAI
 import telebot
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -130,6 +163,12 @@ except ImportError:
 
 # ═══════════════════════════════════════════════════════════
 # CONFIGURATION & ENV SETUP
+
+# إذا كان GOOGLE_CREDENTIALS_JSON موجود، اكتب محتواه إلى sandy-gcloud-key.json واستخدمه تلقائياً
+if os.getenv("GOOGLE_CREDENTIALS_JSON"):
+    with open("sandy-gcloud-key.json", "w") as f:
+        f.write(os.getenv("GOOGLE_CREDENTIALS_JSON"))
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = os.path.abspath("sandy-gcloud-key.json")
 # ═══════════════════════════════════════════════════════════
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -369,6 +408,10 @@ def synthesize_voice_with_azure(text: str) -> Optional[bytes]:
     try:
         speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
         speech_config.speech_synthesis_voice_name = AZURE_SPEECH_VOICE
+        # أعلى جودة متاحة: 48Khz/192Kbps Mono PCM
+        speech_config.set_speech_synthesis_output_format(
+            speechsdk.SpeechSynthesisOutputFormat.Audio48Khz192KBitRateMonoPcm
+        )
 
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
             temp_path = tmp.name
@@ -380,7 +423,7 @@ def synthesize_voice_with_azure(text: str) -> Optional[bytes]:
         if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted and Path(temp_path).exists():
             with open(temp_path, "rb") as f:
                 audio_bytes = f.read()
-            print("[Azure TTS] ✅ Voice generated")
+            print("[Azure TTS] ✅ Voice generated (48Khz/192Kbps)")
             return audio_bytes
 
         print(f"[Azure TTS] ❌ Synthesis failed: {result.reason}")
@@ -496,10 +539,16 @@ def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Opti
 
     # إزالة الإيموجي من النص الصوتي حتى لا تُقرأ كنص
     def remove_emojis(s):
-        return emoji.replace_emoji(s, replace="")
+        try:
+            import emoji
+            return emoji.replace_emoji(s, replace="")
+        except ImportError:
+            return s
 
     tts_text = remove_emojis(text_without_reaction)
-    audio_bytes = synthesize_voice_with_azure(tts_text)
+    audio_bytes = synthesize_voice_with_google(tts_text)
+    if not audio_bytes:
+        audio_bytes = synthesize_voice_with_azure(tts_text)
     if audio_bytes:
         try:
             telegram_bot.send_voice(chat_id, audio_bytes, timeout=120)
