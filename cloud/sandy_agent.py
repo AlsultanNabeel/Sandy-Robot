@@ -26,9 +26,12 @@ from app.features.research import (
     run_research_pipeline,
 )
 from app.features.reminders import (
-    add_reminder,
     check_reminders,
-    plan_reminder_with_ai,
+)
+from app.agent.core import (
+    plan_action_with_ai,
+    execute_planned_action,
+    render_action_reply_with_ai,
 )
 from app.agent.memory import (
     load_memory,
@@ -67,6 +70,7 @@ from app.api.telegram_runtime import (
     configure_sandy_scheduler,
     build_telegram_webhook_runtime,
 )
+from app.features.tasks import add_task, complete_task, list_tasks
 
 
 # Try to import Chroma for smart memory
@@ -205,31 +209,40 @@ REMINDERS_FILE = TASKS_DIR / "reminders.json"
 # ═══════════════════════════════════════════════════════════
 # INITIALIZATION
 # ═══════════════════════════════════════════════════════════
+def _mask_secret(value: str, visible: int = 4) -> str:
+    if not value:
+        return "EMPTY"
+    if len(value) <= visible * 2:
+        return "*" * len(value)
+    return f"{value[:visible]}...{value[-visible:]}"
 
 if not OPENAI_API_KEY:
-    print("[WARNING] OPENAI_API_KEY missing - will fail on first request")
-    print(f"[DEBUG] OPENAI_API_KEY value: {OPENAI_API_KEY}")
-    print(f"[DEBUG] TELEGRAM_BOT_TOKEN value: {TELEGRAM_BOT_TOKEN}")
-    print(f"[DEBUG] SANDY_USER_CHAT_ID value: {SANDY_USER_CHAT_ID}")
-    # Don't raise error - let it fail gracefully
-    # raise RuntimeError("OPENAI_API_KEY missing in .env")
+    print("[WARNING] OPENAI_API_KEY missing - OpenAI fallback will not work")
 
 if not TELEGRAM_BOT_TOKEN:
-    print("[WARNING] TELEGRAM_BOT_TOKEN missing")
-    # raise RuntimeError("TELEGRAM_BOT_TOKEN missing in .env")
+    raise RuntimeError("TELEGRAM_BOT_TOKEN missing in .env")
 
 if not SANDY_USER_CHAT_ID:
     print("[WARNING] SANDY_USER_CHAT_ID missing")
-    # raise RuntimeError("SANDY_USER_CHAT_ID missing in .env")
 
-openai_client = OpenAI(api_key=OPENAI_API_KEY)
+print("[DEBUG STARTUP] Environment Variables:")
+print(f"  OPENAI_API_KEY: {'SET' if OPENAI_API_KEY else 'EMPTY'}")
+print(f"  TELEGRAM_BOT_TOKEN: {'SET' if TELEGRAM_BOT_TOKEN else 'EMPTY'}")
+print(f"  SANDY_USER_CHAT_ID: {'SET' if SANDY_USER_CHAT_ID else 'EMPTY'}")
+
+# Optional masked debug only
+print(f"[DEBUG] OPENAI_API_KEY masked: {_mask_secret(OPENAI_API_KEY)}")
+print(f"[DEBUG] TELEGRAM_BOT_TOKEN masked: {_mask_secret(TELEGRAM_BOT_TOKEN)}")
+
+openai_client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+
 azure_openai_client = None
 if AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY:
     try:
         azure_openai_client = AzureOpenAI(
             api_key=AZURE_OPENAI_API_KEY,
             api_version=AZURE_OPENAI_API_VERSION,
-            azure_endpoint=AZURE_OPENAI_ENDPOINT
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
         )
         print("[Azure OpenAI] ✅ Connected")
     except Exception as e:
@@ -252,6 +265,7 @@ telegram_webhook_runtime = build_telegram_webhook_runtime(
 
 LAST_ASSISTANT_REACTION = None
 
+
 def _set_last_assistant_reaction(reaction: Optional[str]):
     global LAST_ASSISTANT_REACTION
     LAST_ASSISTANT_REACTION = reaction
@@ -267,6 +281,7 @@ class SandyAgent:
     def __init__(self):
         self.memory = load_memory(memory_file=MEMORY_FILE, mongo_db=mongo_db)
         self.session = load_session(session_file=SESSION_FILE, mongo_db=mongo_db)
+        self.session.setdefault("pending_action", None)
         self.is_speaking = False
         self.last_activity = datetime.now()
         self.last_research_results = []
@@ -427,27 +442,61 @@ class SandyAgent:
                 )
                 return str(summary_text or "[think] البحث اشتغل، لكن ما قدرت أرتب النتيجة كنص واضح.")
 
-            reminder_plan = plan_reminder_with_ai(
+            action_plan = plan_action_with_ai(
                 user_message,
+                session=self.session,
                 create_chat_completion_fn=create_chat_completion,
+                mongo_db=mongo_db,
+                tasks_file=TASKS_FILE,
             )
-            if reminder_plan and reminder_plan.get("is_reminder"):
-                reminder_text = reminder_plan.get("reminder_text", "")
-                remind_at = reminder_plan.get("remind_at_iso", "")
-                should_create = reminder_plan.get("should_create", False)
-                assistant_reply = reminder_plan.get("assistant_reply", "")
 
-                if should_create and reminder_text and remind_at:
-                   add_reminder(reminder_text, remind_at, mongo_db=mongo_db, reminders_file=REMINDERS_FILE)
-                   return get_sandy_reply(
-                        user_message,
-                        self.memory,
-                        f"[happy] تمام ✅ سجلت التذكير: {reminder_text}"
-                    )
+            action_result = execute_planned_action(
+                action_plan,
+                session=self.session,
+                user_message=user_message,
+                create_chat_completion_fn=create_chat_completion,
+                mongo_db=mongo_db,
+                tasks_file=TASKS_FILE,
+                reminders_file=REMINDERS_FILE,
+            )
 
-                if assistant_reply:
-                    return get_sandy_reply(user_message, self.memory, assistant_reply)
-                return get_sandy_reply(user_message, self.memory, "[think] فهمت إنك بتحكي عن تذكير، بس بدي تفاصيل أدق شوي حتى أسجله بشكل صحيح.")
+            if action_result.get("handled"):
+                assistant_message = render_action_reply_with_ai(
+                    user_message,
+                    action_result,
+                    create_chat_completion_fn=create_chat_completion,
+                )
+
+                self.session.setdefault("messages", [])
+                self.session["messages"].append({
+                    "role": "user",
+                    "content": user_message,
+                    "timestamp": datetime.now().isoformat()
+                })
+                self.session["messages"].append({
+                    "role": "assistant",
+                    "content": assistant_message,
+                    "timestamp": datetime.now().isoformat()
+                })
+
+                if len(self.session["messages"]) > 20:
+                    self.session["messages"] = self.session["messages"][-20:]
+
+                save_session(self.session, session_file=SESSION_FILE, mongo_db=mongo_db)
+
+                self.memory["conversations"].append({
+                    "user": user_message,
+                    "assistant": assistant_message,
+                    "timestamp": datetime.now().isoformat()
+                })
+
+                if len(self.memory["conversations"]) > 100:
+                    self.memory["conversations"] = self.memory["conversations"][-100:]
+
+                save_memory(self.memory, memory_file=MEMORY_FILE, mongo_db=mongo_db)
+
+                return get_sandy_reply(user_message, self.memory, assistant_message)
+            
 
             system_prompt = self.build_system_prompt()
             context = self.get_context(user_message)
