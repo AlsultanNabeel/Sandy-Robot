@@ -24,10 +24,6 @@ from openai import OpenAI, AzureOpenAI
 import telebot
 from apscheduler.schedulers.background import BackgroundScheduler
 import certifi
-from app.utils.text import (
-    extract_reaction_and_clean_text,
-    prepare_tts_text,
-)
 from app.features.research import (
     detect_research_type,
     extract_requested_result_count,
@@ -40,6 +36,9 @@ from app.features.research import (
     filter_research_results,
     rank_research_results,
     is_official_source_url,
+    extract_structured_page_data,
+    normalize_education_page_data,
+    run_research_pipeline,
 )
 from app.features.tasks import (
     add_task,
@@ -85,11 +84,24 @@ from app.features.images import (
     extract_image_prompt,
 )
 from app.integrations.telegram_api import download_telegram_file_bytes
-from app.integrations.google_tts import synthesize_voice_with_google
 from app.integrations.azure_speech import (
     transcribe_audio_with_azure,
-    synthesize_voice_with_azure,
 )
+from app.features.vision import (
+    analyze_image_with_azure,
+    generate_image_with_azure,
+)
+from app.features.voice import send_text_and_voice_reply
+from app.api.telegram_handlers import (
+    _is_duplicate_telegram_message,
+    _is_authorized_user,
+    register_basic_telegram_handlers,
+)
+from app.api.telegram_runtime import (
+    prepare_telegram_polling,
+    set_telegram_webhook,
+)
+
 
 
 
@@ -136,396 +148,6 @@ MOOD_TTS_VOICES = {
     "tired": os.getenv("GOOGLE_TTS_VOICE_TIRED", "ar-XA-Chirp3-HD-Aoede").strip(),
     "serious": os.getenv("GOOGLE_TTS_VOICE_SERIOUS", "ar-XA-Chirp3-HD-Despina").strip(),
 }
-
-# ========== SANDY PERSONALITY ENGINE ==========
-
-
-
-# هاي الدالة بتاخد النص الخام من الصفحة وبتخلي الذكاء الاصطناعي يطلع منه معلومات مرتبة ومختصرة حسب نوع البحث.
-def extract_structured_page_data(page_content: Dict[str, Any], research_type: str = "general") -> Dict[str, Any]:
-    if not page_content:
-        return {}
-
-    page_text = (page_content.get("text", "") or "").strip()
-    page_title = page_content.get("title", "")
-    page_url = page_content.get("url", "")
-
-    effective_research_type = research_type
-
-    education_hints = [
-        "master", "masters", "máster", "universitario", "universidad", "university",
-        "robotics", "robótica", "robotica", "automática", "automatica",
-        "admission", "credits", "ects", "preinscripción", "preinscripcion"
-    ]
-
-    combined_text = f"{page_title}\n{page_url}\n{page_text[:2000]}".lower()
-
-    if research_type == "general" and any(hint in combined_text for hint in education_hints):
-        effective_research_type = "education"
-
-    if not page_text:
-        return {}
-
-    if effective_research_type == "education":
-        extraction_instruction = """
-Extract the following fields from this official education/program page:
-- institution_name
-- program_name
-- degree_level
-- country
-- city
-- language_of_instruction
-- admission_requirements
-- english_requirement
-- requires_ielts_or_toefl (true/false/unknown)
-- tuition
-- deadline
-- application_url
-- official_program_url
-- summary
-
-Return valid JSON only.
-"""
-    elif effective_research_type == "travel":
-        extraction_instruction = """
-Extract the following fields from this travel/hotel/visa page:
-- place_name
-- country
-- city
-- type
-- price
-- booking_link
-- visa_info
-- important_requirements
-- summary
-
-Return valid JSON only.
-"""
-    elif effective_research_type == "product":
-        extraction_instruction = """
-Extract the following fields from this product page:
-- product_name
-- brand
-- price
-- currency
-- availability
-- key_features
-- pros
-- cons
-- official_url
-- summary
-
-Return valid JSON only.
-"""
-    elif effective_research_type == "news":
-        extraction_instruction = """
-Extract the following fields from this news page:
-- headline
-- publisher
-- published_date
-- key_points
-- summary
-- source_url
-
-Return valid JSON only.
-"""
-    else:
-        extraction_instruction = """
-Extract the following fields from this page:
-- title
-- main_entity
-- important_requirements
-- price_or_cost
-- relevant_dates
-- official_link
-- summary
-
-Return valid JSON only.
-"""
-
-    try:
-        response = create_chat_completion(
-            messages=[
-                {
-                    "role": "system",
-                    "content": extraction_instruction
-                },
-                {
-                    "role": "user",
-                    "content": f"PAGE TITLE: {page_title}\nPAGE URL: {page_url}\n\nPAGE TEXT:\n{page_text[:12000]}"
-                }
-            ],
-            temperature=0,
-            max_tokens=900,
-            response_format={"type": "json_object"},
-            prefer_azure=True
-        )
-
-        parsed = json.loads(response.choices[0].message.content or "{}")
-        return parsed
-
-    except Exception as e:
-        print(f"[Research] ❌ Structured extraction failed for {page_url}: {e}")
-        return {
-            "title": page_title,
-            "official_link": page_url,
-            "summary": (page_text[:700] + "...") if len(page_text) > 700 else page_text
-        }
-
-
-def normalize_education_page_data(page_data: Dict[str, Any], source_url: str = "") -> Dict[str, Any]:
-    if not isinstance(page_data, dict):
-        return {}
-
-    cleaned = dict(page_data)
-
-    def clean_value(value: Any) -> str:
-        return str(value or "").strip()
-
-    institution_name = clean_value(cleaned.get("institution_name"))
-    program_name = clean_value(cleaned.get("program_name"))
-    degree_level = clean_value(cleaned.get("degree_level"))
-    country = clean_value(cleaned.get("country"))
-    city = clean_value(cleaned.get("city"))
-    language_of_instruction = clean_value(cleaned.get("language_of_instruction"))
-    admission_requirements = clean_value(cleaned.get("admission_requirements"))
-    english_requirement = clean_value(cleaned.get("english_requirement"))
-    requires_ielts_or_toefl = clean_value(cleaned.get("requires_ielts_or_toefl"))
-    tuition = clean_value(cleaned.get("tuition"))
-    deadline = clean_value(cleaned.get("deadline"))
-    application_url = clean_value(cleaned.get("application_url"))
-    official_program_url = clean_value(cleaned.get("official_program_url"))
-    summary = clean_value(cleaned.get("summary"))
-
-    # توحيد القيم المجهولة
-    unknown_values = {
-        "unknown", "not specified", "not specified.", "n/a", "none",
-        "no especificado", "no especificado en la página.", "no especificado en la pagina.",
-        "desconocido"
-    }
-
-    if language_of_instruction.lower() in unknown_values:
-        language_of_instruction = ""
-    if requires_ielts_or_toefl.lower() in unknown_values:
-        requires_ielts_or_toefl = ""
-    if tuition.lower() in unknown_values:
-        tuition = ""
-    if deadline.lower() in unknown_values:
-        deadline = ""
-
-    # تصحيح أسماء دول/مدن غير منطقية لبعض جامعات إسبانيا
-    source_url_lower = source_url.lower()
-    institution_lower = institution_name.lower()
-
-    if (
-        "valencia" in institution_lower
-        or "universitat politècnica de valència" in institution_lower
-        or "upv.es" in source_url_lower
-    ):
-        if country.lower() not in {"spain", "españa", "espana", ""}:
-            country = "Spain"
-        if city.lower() not in {"valencia", ""}:
-            city = "Valencia"
-
-    if (
-        "universidad de alicante" in institution_lower
-        or "ua.es" in source_url_lower
-    ):
-        if country.lower() not in {"spain", "españa", "espana", ""}:
-            country = "Spain"
-        if city.lower() not in {"alicante", ""}:
-            city = "Alicante"
-
-    if (
-        "carlos iii" in institution_lower
-        or "uc3m.es" in source_url_lower
-    ):
-        if country.lower() not in {"spain", "españa", "espana", ""}:
-            country = "Spain"
-
-    cleaned["institution_name"] = institution_name
-    cleaned["program_name"] = program_name
-    cleaned["degree_level"] = degree_level
-    cleaned["country"] = country
-    cleaned["city"] = city
-    cleaned["language_of_instruction"] = language_of_instruction
-    cleaned["admission_requirements"] = admission_requirements
-    cleaned["english_requirement"] = english_requirement
-    cleaned["requires_ielts_or_toefl"] = requires_ielts_or_toefl
-    cleaned["tuition"] = tuition
-    cleaned["deadline"] = deadline
-    cleaned["application_url"] = application_url
-    cleaned["official_program_url"] = official_program_url
-    cleaned["summary"] = summary
-
-    return cleaned
-
-
-
-
-# بتدور على برامج جامعية، بتفلتر النتائج الرسمية، وبتسحب معلومات عن كل برنامج
-def run_research_pipeline(user_query: str, research_type: str = "general", requested_count: int = 5) -> List[Dict[str, Any]]:
-    print(f"[Research] 🔍 Starting {research_type} research for: {user_query}")
-
-    exa_results = search_exa(
-        user_query,
-        exa_api_key=EXA_API_KEY,
-        num_results=WEB_RESEARCH_MAX_CANDIDATES
-    )
-    if not exa_results:
-        return []
-
-    candidates = []
-
-    for item in exa_results:
-        url = item.get("url", "")
-        if not url:
-            continue
-
-        if is_official_source_url(url, research_type=research_type):
-            candidates.append(item)
-
-    # إذا الفلترة كانت شديدة وما رجع شيء، خذ fallback بعد انتهاء اللوب
-    if not candidates:
-        print("[Research] ⚠️ No official-looking candidates found after filtering")
-
-        soft_candidates = []
-        soft_blocked = [
-            "educations.com",
-            "educations.es",
-            "mastersportal.com",
-            "masterstudies.com",
-            "findamasters.com",
-            "studyportals.com",
-            "financialmagazine.es",
-            "universoptimum.com",
-            "yaq.es",
-            "edurank.org",
-            "erudera.com",
-            "topuniversities.com",
-            "timeshighereducation.com",
-            "shiksha.com",
-        ]
-
-        for item in exa_results:
-            url = item.get("url", "").lower()
-            if not url:
-                continue
-            if any(bad in url for bad in soft_blocked):
-                continue
-            soft_candidates.append(item)
-
-        candidates = soft_candidates[: max(requested_count * 2, requested_count)]
-
-    extracted_results = []
-    
-
-    if research_type == "education":
-        extraction_prompt = """
-Extract the following fields from this page in a clear structured way:
-- institution_name
-- program_name
-- degree_level
-- country
-- city
-- language_of_instruction
-- admission_requirements
-- english_requirement
-- requires_ielts_or_toefl (true/false/unknown)
-- tuition
-- deadline
-- application_url
-- official_program_url
-- summary
-
-Return the result as structured data.
-"""
-    elif research_type == "travel":
-        extraction_prompt = """
-Extract the following fields from this page in a clear structured way:
-- place_name
-- country
-- city
-- type
-- price
-- booking_link
-- visa_info
-- important_requirements
-- summary
-
-Return the result as structured data.
-"""
-    elif research_type == "product":
-        extraction_prompt = """
-Extract the following fields from this page in a clear structured way:
-- product_name
-- brand
-- price
-- currency
-- availability
-- key_features
-- pros
-- cons
-- official_url
-- summary
-
-Return the result as structured data.
-"""
-    elif research_type == "news":
-        extraction_prompt = """
-Extract the following fields from this page in a clear structured way:
-- headline
-- publisher
-- published_date
-- key_points
-- summary
-- source_url
-
-Return the result as structured data.
-"""
-    else:
-        extraction_prompt = """
-Extract the following fields from this page in a clear structured way:
-- title
-- main_entity
-- important_requirements
-- price_or_cost
-- relevant_dates
-- official_link
-- summary
-
-Return the result as structured data.
-"""
-
-    for item in candidates[: max(requested_count * 2, requested_count)]:
-        url = item.get("url", "")
-        page_content = get_exa_page_content(
-            url,
-            exa_api_key=EXA_API_KEY,
-        )
-        page_data = extract_structured_page_data(page_content, research_type=research_type)
-
-        if research_type == "education":
-            page_data = normalize_education_page_data(page_data, source_url=url)
-
-        print(f"[Research] Parsed structured data keys for {url}: {list(page_data.keys()) if isinstance(page_data, dict) else 'N/A'}")
-
-        extracted_results.append({
-            "source_title": item.get("title", ""),
-            "source_url": url,
-            "exa_snippet": item.get("text", ""),
-            "page_content": page_content,
-            "page_data": page_data
-        })
-
-    deduped_results = deduplicate_research_results(extracted_results)
-
-    print(f"[Research] ✅ Finished research with {len(extracted_results)} extracted results")
-    print(f"[Research] ✅ After deduplication: {len(deduped_results)} unique results")
-
-    return deduped_results
-
-
 
 # ═══════════════════════════════════════════════════════════
 # CONFIGURATION & ENV SETUP
@@ -663,150 +285,11 @@ telegram_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=True)
 scheduler = BackgroundScheduler(timezone=None)
 scheduler.start()
 
+LAST_ASSISTANT_REACTION = None
 
-
-# بتحلل صورة باستخدام Azure/OpenAI وبتعطيك وصف مختصر بالعربي
-def analyze_image_with_azure(image_bytes: bytes, prompt: str) -> str:
-    """Analyze image bytes using Azure/OpenAI multimodal chat."""
-    if not image_bytes:
-        return "[think] ما قدرت أحلل الصورة حالياً."
-
-    try:
-        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-        data_url = f"data:image/jpeg;base64,{image_b64}"
-        model_hint = AZURE_OPENAI_VISION_DEPLOYMENT or AZURE_OPENAI_CHAT_DEPLOYMENT or OPENAI_MODEL
-
-        response = create_chat_completion(
-            messages=[
-                {
-                    "role": "system",
-                    "content": "حلل الصورة بدقة وباختصار باللغة العربية مع نقاط عملية."
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": data_url}}
-                    ]
-                }
-            ],
-            temperature=0.2,
-            max_tokens=450,
-            prefer_azure=True,
-            model_hint=model_hint
-        )
-        return (response.choices[0].message.content or "[think] تم التحليل لكن ما في وصف واضح.").strip()
-    except Exception as e:
-        print(f"[Azure Vision] ❌ Analysis failed: {e}")
-        return "[think] صار خلل أثناء تحليل الصورة. جرب مرة ثانية."
-
-# بتولد صورة جديدة باستخدام Azure OpenAI حسب الوصف اللي تعطيه
-
-def generate_image_with_azure(prompt: str, size: str = "1024x1024") -> Optional[bytes]:
-    """Generate image with Azure OpenAI and return image bytes."""
-    if not prompt:
-        return None
-
-    if azure_openai_client is None or not AZURE_OPENAI_IMAGE_DEPLOYMENT:
-        print("[Azure Image] ⚠️ Missing Azure OpenAI client or image deployment")
-        return None
-
-    try:
-        result = azure_openai_client.images.generate(
-            model=AZURE_OPENAI_IMAGE_DEPLOYMENT,
-            prompt=prompt,
-            size=size
-        )
-
-        if not getattr(result, "data", None):
-            print("[Azure Image] ⚠️ Empty image response")
-            return None
-
-        first = result.data[0]
-
-        # Prefer base64 payload when available
-        if getattr(first, "b64_json", None):
-            return base64.b64decode(first.b64_json)
-
-        # Fallback: download image from URL
-        if getattr(first, "url", None):
-            response = requests.get(first.url, timeout=30)
-            if response.status_code == 200:
-                return response.content
-            print(f"[Azure Image] ⚠️ URL download failed with {response.status_code}")
-
-    except Exception as e:
-        print(f"[Azure Image] ❌ Generation failed: {e}")
-
-    return None
-
-
-# بتبعت رسالة نصية للمستخدم، ولو فيه صوت بتبعت كمان رد صوتي
-def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Optional[int] = None):
-    # بتبعت رسالة نصية للمستخدم، ولو فيه صوت بتبعت كمان رد صوتي
-    text = str(text or "[think] صار خلل وما رجع نص واضح.")
-    # استخرج الرياكشن من الرد (إذا موجود)
-    reaction, text_without_reaction = extract_reaction_and_clean_text(text)
-    # حفظ الرياكشن في متغير عالمي (للهاردوير لاحقاً)
+def _set_last_assistant_reaction(reaction: Optional[str]):
     global LAST_ASSISTANT_REACTION
     LAST_ASSISTANT_REACTION = reaction
-    # توثيق: هذا المتغير مهم لتمرير الرياكشن للهاردوير (الشاشة) مستقبلاً
-
-    telegram_bot.send_message(chat_id, text_without_reaction, reply_to_message_id=reply_to_message_id, parse_mode=None)
-
-    # إزالة الإيموجي من النص الصوتي حتى لا تُقرأ كنص والروابط ايضا
-    def remove_emojis(s):
-        try:
-            import emoji
-            return emoji.replace_emoji(s, replace="")
-        except ImportError:
-            return s
-    tts_text = prepare_tts_text(text_without_reaction)
-    tts_text = remove_emojis(tts_text)
-
-    print(f"[DEBUG] Trying Google TTS for: {tts_text}")
-
-    current_state = agent.memory.get("sandy_state", {})
-    current_mood = current_state.get("mood", "neutral")
-    current_style = current_state.get("style", "normal")
-
-    print(f"[DEBUG] Voice mood='{current_mood}' style='{current_style}'")
-
-    audio_bytes = synthesize_voice_with_google(
-        tts_text,
-        mood=current_mood,
-        style=current_style,
-        google_tts_voice=GOOGLE_TTS_VOICE,
-        google_tts_language_code=GOOGLE_TTS_LANGUAGE_CODE,
-        mood_tts_voices=MOOD_TTS_VOICES,
-    )
-
-    if audio_bytes:
-        print("[DEBUG] Google TTS succeeded. Sending Google voice reply.")
-        source = "Google TTS"
-    else:
-        print("[DEBUG] Google TTS failed. Trying Azure TTS...")
-        audio_bytes = synthesize_voice_with_azure(
-            tts_text,
-            azure_speech_available=AZURE_SPEECH_AVAILABLE,
-            azure_speech_key=AZURE_SPEECH_KEY,
-            azure_speech_region=AZURE_SPEECH_REGION,
-            azure_speech_voice=AZURE_SPEECH_VOICE,
-        )
-        if audio_bytes:
-            print("[DEBUG] Azure TTS succeeded. Sending Azure voice reply.")
-            source = "Azure TTS"
-        else:
-            print("[DEBUG] Both Google and Azure TTS failed. No voice reply will be sent.")
-            source = None
-
-    if audio_bytes:
-        try:
-            telegram_bot.send_voice(chat_id, audio_bytes, timeout=120)
-            print(f"[DEBUG] Voice sent via Telegram. Source: {source}")
-        except Exception as e:
-            print(f"[Telegram] ⚠️ Voice reply failed: {e}")
-
 
 
 # ═══════════════════════════════════════════════════════════
@@ -948,7 +431,12 @@ class SandyAgent:
                 research_results = run_research_pipeline(
                     user_message,
                     research_type=research_type,
-                    requested_count=max(requested_count * 2, requested_count)
+                    requested_count=max(requested_count * 2, requested_count),
+                    search_exa_fn=search_exa,
+                    get_exa_page_content_fn=get_exa_page_content,
+                    create_chat_completion_fn=create_chat_completion,
+                    exa_api_key=EXA_API_KEY,
+                    web_research_max_candidates=WEB_RESEARCH_MAX_CANDIDATES,
                 )
 
                 research_results = deduplicate_research_results(research_results)
@@ -1101,6 +589,34 @@ def show_pending_reminders(self) -> Optional[str]:
 
 agent = SandyAgent()
 
+register_basic_telegram_handlers(
+    telegram_bot=telegram_bot,
+    agent=agent,
+    sandy_user_chat_id=SANDY_USER_CHAT_ID,
+    extract_image_prompt_fn=extract_image_prompt,
+    generate_image_with_azure_fn=generate_image_with_azure,
+    send_text_and_voice_reply_fn=send_text_and_voice_reply,
+    set_last_assistant_reaction_fn=_set_last_assistant_reaction,
+    google_tts_voice=GOOGLE_TTS_VOICE,
+    google_tts_language_code=GOOGLE_TTS_LANGUAGE_CODE,
+    mood_tts_voices=MOOD_TTS_VOICES,
+    azure_speech_available=AZURE_SPEECH_AVAILABLE,
+    azure_speech_key=AZURE_SPEECH_KEY,
+    azure_speech_region=AZURE_SPEECH_REGION,
+    azure_speech_voice=AZURE_SPEECH_VOICE,
+    azure_openai_client=azure_openai_client,
+    azure_openai_image_deployment=AZURE_OPENAI_IMAGE_DEPLOYMENT,
+    analyze_image_with_azure_fn=analyze_image_with_azure,
+    download_telegram_file_bytes_fn=download_telegram_file_bytes,
+    create_chat_completion_fn=create_chat_completion,
+    azure_openai_vision_deployment=AZURE_OPENAI_VISION_DEPLOYMENT,
+    azure_openai_chat_deployment=AZURE_OPENAI_CHAT_DEPLOYMENT,
+    openai_model=OPENAI_MODEL,
+    transcribe_audio_with_azure_fn=transcribe_audio_with_azure,
+    azure_openai_stt_deployment=AZURE_OPENAI_STT_DEPLOYMENT,
+    is_image_generation_request_fn=is_image_generation_request,
+    )
+
 # Guard against duplicated Telegram deliveries/restarts.
 _recent_message_keys = deque(maxlen=500)
 _recent_message_set = set()
@@ -1128,237 +644,6 @@ def _is_duplicate_telegram_message(message) -> bool:
 
 def _is_authorized_user(message) -> bool:
     return str(message.from_user.id) == SANDY_USER_CHAT_ID
-
-# هاندلر أمر /start و /help: بيعرف ساندي عن نفسها
-@telegram_bot.message_handler(commands=['start', 'help'])
-def handle_start(message):
-    # أول ما المستخدم يكتب /start، ساندي بتعرف عن نفسها وبتشرح شو بتقدر تعمل
-    response = """[love] أهلاً  ! 💫
-أنا ساندي، وكيلك الذكي الجديد!
-الآن بأشتغل 24/7 بدون ما تحتاج تشغّل اللابتوب.
-
-بتقدر:
-🔍 تسأليني أي حاجة
-📧 أرسل رسائل وإيميلات
-📅 أدير مهامك وتذكيراتك
-🤖 أتحكم بـ Sandy
-💾 أتذكر كل شي عنك
-
-جرّب: "صباح الخير!" أو "إبحثي عن..."
-"""
-    telegram_bot.reply_to(message, response)
-
-# هاندلر أمر /image أو /img: بيولد صورة ويرجعها
-@telegram_bot.message_handler(commands=['image', 'img'])
-def handle_image_command(message):
-    # لما المستخدم يطلب صورة بـ /image، هون ساندي بتولد صورة وترجعها
-    try:
-        if _is_duplicate_telegram_message(message):
-            return
-        if not _is_authorized_user(message):
-            telegram_bot.reply_to(message, "معاف، بس المستخدم بيقدر يتكلم معي 🔒")
-            return
-
-        chat_id = message.chat.id
-        prompt = extract_image_prompt(message.text or "")
-        if not prompt:
-            telegram_bot.reply_to(
-                message,
-                "[think] اكتب وصف الصورة بعد الأمر. مثال: /image قطة كرتونية تلبس نظارات"
-            )
-            return
-
-        telegram_bot.send_chat_action(chat_id, 'upload_photo')
-        image_bytes = generate_image_with_azure(prompt)
-        if not image_bytes:
-            telegram_bot.reply_to(
-                message,
-                "[think] ما قدرت أولد الصورة. تأكد من AZURE_OPENAI_IMAGE_DEPLOYMENT."
-            )
-            return
-
-        photo_file = io.BytesIO(image_bytes)
-        photo_file.name = "sandy_generated.png"
-        telegram_bot.send_photo(chat_id, photo_file, caption=f"[happy] تفضّل ✨\nالوصف: {prompt}")
-        send_text_and_voice_reply(chat_id, "[happy] ولدت الصورة بنجاح ✨ إذا بدك أعدل الستايل ابعتلي وصف جديد.", reply_to_message_id=message.message_id)
-    except Exception as e:
-        print(f"[Error] Image command handler: {e}")
-        telegram_bot.reply_to(message, "[think] صار خلل أثناء توليد الصورة.")
-
-# هاندلر استقبال صورة: بيحللها باستخدام Azure AI
-@telegram_bot.message_handler(content_types=['photo'])
-def handle_photo(message):
-    # لو المستخدم بعت صورة، ساندي بتحللها باستخدام Azure AI
-    try:
-        if _is_duplicate_telegram_message(message):
-            return
-        if not _is_authorized_user(message):
-            telegram_bot.reply_to(message, "معاف، بس المستخدم بيقدر يتكلم معي 🔒")
-            return
-
-        chat_id = message.chat.id
-        telegram_bot.send_chat_action(chat_id, 'typing')
-
-        photo = message.photo[-1] if message.photo else None
-        if not photo:
-            telegram_bot.reply_to(message, "[think] ما وصلتني الصورة بشكل صحيح.")
-            return
-
-        downloaded = download_telegram_file_bytes(telegram_bot, photo.file_id)
-        if not downloaded:
-            telegram_bot.reply_to(message, "[think] ما قدرت أحمّل الصورة من تيليجرام.")
-            return
-
-        image_bytes, _ = downloaded
-        prompt = message.caption or "حللي الصورة باختصار وقدمي أهم الملاحظات."
-        analysis = analyze_image_with_azure(image_bytes, prompt)
-        telegram_bot.send_message(chat_id, analysis, reply_to_message_id=message.message_id, parse_mode=None)
-    except Exception as e:
-        print(f"[Error] Photo handler: {e}")
-        telegram_bot.reply_to(message, "[think] صار خلل أثناء تحليل الصورة.")
-
-# هاندلر استقبال فيديو: بيحلل صورة المعاينة (thumbnail) للفيديو
-@telegram_bot.message_handler(content_types=['video'])
-def handle_video(message):
-    """Analyze video via preview thumbnail to avoid heavy processing errors."""
-    try:
-        if _is_duplicate_telegram_message(message):
-            return
-        if not _is_authorized_user(message):
-            telegram_bot.reply_to(message, "معاف، بس المستخدم بيقدر يتكلم معي 🔒")
-            return
-
-        chat_id = message.chat.id
-        telegram_bot.send_chat_action(chat_id, 'typing')
-
-        thumb = getattr(message.video, 'thumbnail', None) or getattr(message.video, 'thumb', None)
-        if not thumb:
-            telegram_bot.send_message(
-                chat_id,
-                "[think] وصل الفيديو، لكن بدون Thumbnail للتحليل البصري."
-                " ابعته كصورة أو فيديو فيه معاينة.",
-                reply_to_message_id=message.message_id,
-                parse_mode=None
-            )
-            return
-
-        downloaded = download_telegram_file_bytes(telegram_bot, thumb.file_id)
-        if not downloaded:
-            telegram_bot.reply_to(message, "[think] ما قدرت أحمّل معاينة الفيديو.")
-            return
-
-        image_bytes, _ = downloaded
-        prompt = message.caption or "حللي محتوى الفيديو اعتماداً على لقطة المعاينة وقدمي وصف مختصر."
-        analysis = analyze_image_with_azure(image_bytes, prompt)
-        telegram_bot.send_message(chat_id, analysis, reply_to_message_id=message.message_id, parse_mode=None)
-    except Exception as e:
-        print(f"[Error] Video handler: {e}")
-        telegram_bot.reply_to(message, "[think] صار خلل أثناء تحليل الفيديو.")
-
-# هاندلر استقبال صوت أو ملف صوتي: بيحول الصوت لنص ويرد عليه
-@telegram_bot.message_handler(content_types=['voice', 'audio'])
-def handle_voice_or_audio(message):
-    """Transcribe audio with Azure, then respond with text + voice."""
-    try:
-        if _is_duplicate_telegram_message(message):
-            return
-        if not _is_authorized_user(message):
-            telegram_bot.reply_to(message, "معاف، بس المستخدم بيقدر يتكلم معي 🔒")
-            return
-
-        chat_id = message.chat.id
-        telegram_bot.send_chat_action(chat_id, 'typing')
-
-        media_obj = message.voice if message.content_type == 'voice' else message.audio
-        if not media_obj:
-            telegram_bot.reply_to(message, "[think] ما قدرت أقرأ الملف الصوتي.")
-            return
-
-        downloaded = download_telegram_file_bytes(telegram_bot, media_obj.file_id)
-        if not downloaded:
-            telegram_bot.reply_to(message, "[think] ما قدرت أحمّل الصوت من تيليجرام.")
-            return
-
-        audio_bytes, file_path = downloaded
-        transcript = transcribe_audio_with_azure(
-            audio_bytes,
-            azure_openai_client=azure_openai_client,
-            azure_openai_stt_deployment=AZURE_OPENAI_STT_DEPLOYMENT,
-            file_name=file_path,
-        )
-        if not transcript:
-            telegram_bot.reply_to(message, "[think] ما قدرت أحول الصوت لنص. تأكد من إعداد Azure STT.")
-            return
-
-        print(f"[Telegram] Voice transcript: {transcript}")
-        response = agent.think(transcript)
-        send_text_and_voice_reply(chat_id, response, reply_to_message_id=message.message_id)
-    except Exception as e:
-        print(f"[Error] Voice handler: {e}")
-        telegram_bot.reply_to(message, "[think] صار خلل أثناء تحليل الصوت.")
-
-# هاندلر استقبال أي رسالة نصية: المنطق الرئيسي للردود
-@telegram_bot.message_handler(content_types=['text'])
-def handle_message(message):
-    """Handle all messages"""
-    try:
-        print(f"[DEBUG] Received message from chat_id: {message.chat.id}")
-        if _is_duplicate_telegram_message(message):
-            print(f"[Telegram] Duplicate ignored: chat={message.chat.id}, msg={message.message_id}")
-            return
-
-        user_message = (message.text or "").strip()
-        chat_id = message.chat.id
-
-        if not _is_authorized_user(message):
-            telegram_bot.reply_to(message, "معاف، بس المستخدم بيقدر يتكلم معي 🔒")
-            return
-
-        if not user_message:
-            telegram_bot.reply_to(message, "[think] ما وصلني نص الرسالة.")
-            return
-
-        # Image generation path (text command)
-        if is_image_generation_request(user_message):
-            prompt = extract_image_prompt(user_message)
-            if not prompt:
-                telegram_bot.reply_to(message, "[think] اكتب وصف واضح للصورة اللي بدك ياها.")
-                return
-
-            telegram_bot.send_chat_action(chat_id, 'upload_photo')
-            image_bytes = generate_image_with_azure(prompt)
-            if not image_bytes:
-                telegram_bot.reply_to(
-                    message,
-                    "[think] ما قدرت أولد الصورة حالياً. تأكد من إعداد Azure image deployment."
-                )
-                return
-
-            photo_file = io.BytesIO(image_bytes)
-            photo_file.name = "sandy_generated.png"
-            telegram_bot.send_photo(
-                chat_id,
-                photo_file,
-                caption=f"[happy] هاي الصورة اللي طلبتها ✨\nالوصف: {prompt}",
-                reply_to_message_id=message.message_id
-            )
-            send_text_and_voice_reply(chat_id, "[happy] جاهزة 👌 إذا بدك نسخة ثانية بستايل مختلف احكيلي الوصف الجديد.", reply_to_message_id=message.message_id)
-            return
-        
-        # Show typing indicator
-        telegram_bot.send_chat_action(chat_id, 'typing')
-        
-        # Process message through Sandy Agent
-        print(f"[Telegram] Message from {message.from_user.first_name}: {user_message}")
-        response = agent.think(user_message)
-
-        send_text_and_voice_reply(chat_id, response, reply_to_message_id=message.message_id)
-        
-    except Exception as e:
-        import traceback
-        print(f"[Error] Telegram handler: {e}")
-        traceback.print_exc()
-        telegram_bot.reply_to(message, f"[اعتذر] حدث خطأ: {str(e)}")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1389,17 +674,8 @@ scheduler.add_job(
 # ═══════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════
-# بتجهز البوت لوضع polling المحلي (بتشيل أي webhook)
-
-def prepare_telegram_polling():
-    try:
-        telegram_bot.remove_webhook()
-        print("[Telegram] Webhook removed for local polling mode.")
-    except Exception as e:
-        print(f"[Telegram] Failed to remove webhook: {e}")
 
 # نقطة التشغيل الرئيسية للوكيل ساندي
-
 def main():
     """Main entry point"""
     print("=" * 60)
@@ -1417,7 +693,7 @@ def main():
     if APP_ENV == "local" or RUN_MODE == "polling":
         print("[Mode] Local development: Telegram polling mode (APP_ENV=local or RUN_MODE=polling)")
         # تجاهل RAILWAY_URL تمامًا في الوضع المحلي
-        prepare_telegram_polling()
+        prepare_telegram_polling(telegram_bot)
         while True:
             try:
                 telegram_bot.infinity_polling(
@@ -1465,27 +741,18 @@ def telegram_webhook():
         return "OK", 200
     return "Method Not Allowed", 405
 
-def set_telegram_webhook():
-    if not TELEGRAM_BOT_TOKEN or not RAILWAY_URL:
-        print("[Webhook] TELEGRAM_BOT_TOKEN or RAILWAY_URL not set!")
-        return
-    webhook_url = RAILWAY_URL
-    if not webhook_url.startswith("http"):
-        webhook_url = "https://" + webhook_url
-    webhook_url = webhook_url.rstrip("/") + WEBHOOK_PATH
-    print(f"[Webhook] Setting webhook to: {webhook_url}")
-    telegram_bot.remove_webhook()
-    telegram_bot.set_webhook(
-        url=webhook_url,
-        secret_token=TELEGRAM_SECRET_TOKEN if TELEGRAM_SECRET_TOKEN else None
-    )
-
 if __name__ == "__main__":
     if APP_ENV == "local" or RUN_MODE == "polling":
         # لا تستدعي set_telegram_webhook إطلاقًا في الوضع المحلي
         main()
     else:
         # في الإنتاج فقط: استخدم webhook
-        set_telegram_webhook()
+        set_telegram_webhook(
+            telegram_bot,
+            TELEGRAM_BOT_TOKEN,
+            RAILWAY_URL,
+            WEBHOOK_PATH,
+            TELEGRAM_SECRET_TOKEN,
+        )
         port = int(os.environ.get("PORT", 8080))
         app.run(host="0.0.0.0", port=port)

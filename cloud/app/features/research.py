@@ -1,6 +1,6 @@
 import json
 import re
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 # دالة تحدد نوع البحث قب البحث
@@ -220,6 +220,341 @@ def normalize_program_name(name: str) -> str:
     name = re.sub(r"[^a-z0-9\s]", " ", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name
+
+
+# هاي الدالة بتاخد النص الخام من الصفحة وبتخلي الذكاء الاصطناعي يطلع منه معلومات مرتبة ومختصرة حسب نوع البحث.
+def extract_structured_page_data(
+    page_content: Dict[str, Any],
+    research_type: str = "general",
+    create_chat_completion_fn: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    if not page_content:
+        return {}
+
+    page_text = (page_content.get("text", "") or "").strip()
+    page_title = page_content.get("title", "")
+    page_url = page_content.get("url", "")
+
+    effective_research_type = research_type
+
+    education_hints = [
+        "master", "masters", "máster", "universitario", "universidad", "university",
+        "robotics", "robótica", "robotica", "automática", "automatica",
+        "admission", "credits", "ects", "preinscripción", "preinscripcion",
+    ]
+
+    combined_text = f"{page_title}\n{page_url}\n{page_text[:2000]}".lower()
+
+    if research_type == "general" and any(hint in combined_text for hint in education_hints):
+        effective_research_type = "education"
+
+    if not page_text:
+        return {}
+
+    if effective_research_type == "education":
+        extraction_instruction = """
+Extract the following fields from this official education/program page:
+- institution_name
+- program_name
+- degree_level
+- country
+- city
+- language_of_instruction
+- admission_requirements
+- english_requirement
+- requires_ielts_or_toefl (true/false/unknown)
+- tuition
+- deadline
+- application_url
+- official_program_url
+- summary
+
+Return valid JSON only.
+"""
+    elif effective_research_type == "travel":
+        extraction_instruction = """
+Extract the following fields from this travel/hotel/visa page:
+- place_name
+- country
+- city
+- type
+- price
+- booking_link
+- visa_info
+- important_requirements
+- summary
+
+Return valid JSON only.
+"""
+    elif effective_research_type == "product":
+        extraction_instruction = """
+Extract the following fields from this product page:
+- product_name
+- brand
+- price
+- currency
+- availability
+- key_features
+- pros
+- cons
+- official_url
+- summary
+
+Return valid JSON only.
+"""
+    elif effective_research_type == "news":
+        extraction_instruction = """
+Extract the following fields from this news page:
+- headline
+- publisher
+- published_date
+- key_points
+- summary
+- source_url
+
+Return valid JSON only.
+"""
+    else:
+        extraction_instruction = """
+Extract the following fields from this page:
+- title
+- main_entity
+- important_requirements
+- price_or_cost
+- relevant_dates
+- official_link
+- summary
+
+Return valid JSON only.
+"""
+
+    if create_chat_completion_fn is None:
+        print("[Research] ⚠️ create_chat_completion_fn missing")
+        return {
+            "title": page_title,
+            "official_link": page_url,
+            "summary": (page_text[:700] + "...") if len(page_text) > 700 else page_text,
+        }
+
+    try:
+        response = create_chat_completion_fn(
+            messages=[
+                {
+                    "role": "system",
+                    "content": extraction_instruction,
+                },
+                {
+                    "role": "user",
+                    "content": f"PAGE TITLE: {page_title}\nPAGE URL: {page_url}\n\nPAGE TEXT:\n{page_text[:12000]}",
+                },
+            ],
+            temperature=0,
+            max_tokens=900,
+            response_format={"type": "json_object"},
+            prefer_azure=True,
+        )
+
+        parsed = json.loads(response.choices[0].message.content or "{}")
+        return parsed
+
+    except Exception as e:
+        print(f"[Research] ❌ Structured extraction failed for {page_url}: {e}")
+        return {
+            "title": page_title,
+            "official_link": page_url,
+            "summary": (page_text[:700] + "...") if len(page_text) > 700 else page_text,
+        }
+
+
+# هاي الدالة بتنظف وتوحّد بيانات صفحات البرامج التعليمية بعد الاستخراج.
+def normalize_education_page_data(page_data: Dict[str, Any], source_url: str = "") -> Dict[str, Any]:
+    if not isinstance(page_data, dict):
+        return {}
+
+    cleaned = dict(page_data)
+
+    def clean_value(value: Any) -> str:
+        return str(value or "").strip()
+
+    institution_name = clean_value(cleaned.get("institution_name"))
+    program_name = clean_value(cleaned.get("program_name"))
+    degree_level = clean_value(cleaned.get("degree_level"))
+    country = clean_value(cleaned.get("country"))
+    city = clean_value(cleaned.get("city"))
+    language_of_instruction = clean_value(cleaned.get("language_of_instruction"))
+    admission_requirements = clean_value(cleaned.get("admission_requirements"))
+    english_requirement = clean_value(cleaned.get("english_requirement"))
+    requires_ielts_or_toefl = clean_value(cleaned.get("requires_ielts_or_toefl"))
+    tuition = clean_value(cleaned.get("tuition"))
+    deadline = clean_value(cleaned.get("deadline"))
+    application_url = clean_value(cleaned.get("application_url"))
+    official_program_url = clean_value(cleaned.get("official_program_url"))
+    summary = clean_value(cleaned.get("summary"))
+
+    unknown_values = {
+        "unknown", "not specified", "not specified.", "n/a", "none",
+        "no especificado", "no especificado en la página.", "no especificado en la pagina.",
+        "desconocido",
+    }
+
+    if language_of_instruction.lower() in unknown_values:
+        language_of_instruction = ""
+    if requires_ielts_or_toefl.lower() in unknown_values:
+        requires_ielts_or_toefl = ""
+    if tuition.lower() in unknown_values:
+        tuition = ""
+    if deadline.lower() in unknown_values:
+        deadline = ""
+
+    source_url_lower = source_url.lower()
+    institution_lower = institution_name.lower()
+
+    if (
+        "valencia" in institution_lower
+        or "universitat politècnica de valència" in institution_lower
+        or "upv.es" in source_url_lower
+    ):
+        if country.lower() not in {"spain", "españa", "espana", ""}:
+            country = "Spain"
+        if city.lower() not in {"valencia", ""}:
+            city = "Valencia"
+
+    if (
+        "universidad de alicante" in institution_lower
+        or "ua.es" in source_url_lower
+    ):
+        if country.lower() not in {"spain", "españa", "espana", ""}:
+            country = "Spain"
+        if city.lower() not in {"alicante", ""}:
+            city = "Alicante"
+
+    if (
+        "carlos iii" in institution_lower
+        or "uc3m.es" in source_url_lower
+    ):
+        if country.lower() not in {"spain", "españa", "espana", ""}:
+            country = "Spain"
+
+    cleaned["institution_name"] = institution_name
+    cleaned["program_name"] = program_name
+    cleaned["degree_level"] = degree_level
+    cleaned["country"] = country
+    cleaned["city"] = city
+    cleaned["language_of_instruction"] = language_of_instruction
+    cleaned["admission_requirements"] = admission_requirements
+    cleaned["english_requirement"] = english_requirement
+    cleaned["requires_ielts_or_toefl"] = requires_ielts_or_toefl
+    cleaned["tuition"] = tuition
+    cleaned["deadline"] = deadline
+    cleaned["application_url"] = application_url
+    cleaned["official_program_url"] = official_program_url
+    cleaned["summary"] = summary
+
+    return cleaned
+
+
+# هاي الدالة بتشغّل البحث كامل: نتائج Exa + جلب المحتوى + استخراج منظم + إزالة التكرار.
+def run_research_pipeline(
+    user_query: str,
+    research_type: str = "general",
+    requested_count: int = 5,
+    search_exa_fn: Optional[Callable[..., List[Dict[str, Any]]]] = None,
+    get_exa_page_content_fn: Optional[Callable[..., Dict[str, Any]]] = None,
+    create_chat_completion_fn: Optional[Callable[..., Any]] = None,
+    exa_api_key: str = "",
+    web_research_max_candidates: int = 30,
+) -> List[Dict[str, Any]]:
+    print(f"[Research] 🔍 Starting {research_type} research for: {user_query}")
+
+    if search_exa_fn is None or get_exa_page_content_fn is None:
+        print("[Research] ⚠️ Missing Exa dependencies")
+        return []
+
+    exa_results = search_exa_fn(
+        user_query,
+        exa_api_key=exa_api_key,
+        num_results=web_research_max_candidates,
+    )
+    if not exa_results:
+        return []
+
+    candidates = []
+
+    for item in exa_results:
+        url = item.get("url", "")
+        if not url:
+            continue
+
+        if is_official_source_url(url, research_type=research_type):
+            candidates.append(item)
+
+    if not candidates:
+        print("[Research] ⚠️ No official-looking candidates found after filtering")
+
+        soft_candidates = []
+        soft_blocked = [
+            "educations.com",
+            "educations.es",
+            "mastersportal.com",
+            "masterstudies.com",
+            "findamasters.com",
+            "studyportals.com",
+            "financialmagazine.es",
+            "universoptimum.com",
+            "yaq.es",
+            "edurank.org",
+            "erudera.com",
+            "topuniversities.com",
+            "timeshighereducation.com",
+            "shiksha.com",
+        ]
+
+        for item in exa_results:
+            url = item.get("url", "").lower()
+            if not url:
+                continue
+            if any(bad in url for bad in soft_blocked):
+                continue
+            soft_candidates.append(item)
+
+        candidates = soft_candidates[: max(requested_count * 2, requested_count)]
+
+    extracted_results = []
+
+    for item in candidates[: max(requested_count * 2, requested_count)]:
+        url = item.get("url", "")
+        page_content = get_exa_page_content_fn(
+            url,
+            exa_api_key=exa_api_key,
+        )
+        page_data = extract_structured_page_data(
+            page_content,
+            research_type=research_type,
+            create_chat_completion_fn=create_chat_completion_fn,
+        )
+
+        if research_type == "education":
+            page_data = normalize_education_page_data(page_data, source_url=url)
+
+        print(
+            f"[Research] Parsed structured data keys for {url}: "
+            f"{list(page_data.keys()) if isinstance(page_data, dict) else 'N/A'}"
+        )
+
+        extracted_results.append({
+            "source_title": item.get("title", ""),
+            "source_url": url,
+            "exa_snippet": item.get("text", ""),
+            "page_content": page_content,
+            "page_data": page_data,
+        })
+
+    deduped_results = deduplicate_research_results(extracted_results)
+
+    print(f"[Research] ✅ Finished research with {len(extracted_results)} extracted results")
+    print(f"[Research] ✅ After deduplication: {len(deduped_results)} unique results")
+
+    return deduped_results
 
 
 # هاي الدالة بتبني مفتاح تقريبي للنتيجة حتى نعرف إذا نفس الجامعة/البرنامج طالع أكثر من مرة.

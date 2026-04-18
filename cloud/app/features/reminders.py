@@ -38,7 +38,7 @@ def load_reminders(mongo_db=None, reminders_file: Optional[Path] = None):
             print(f"[Reminders] ⚠️ MongoDB error: {e}")
 
     if reminders_file:
-        reminders_json = _read_json_file(reminders_file, [])
+        reminders_json = read_json_file(reminders_file, [])
         if isinstance(reminders_json, list) and reminders_json:
             print("[Reminders] 📄 Loaded from JSON file")
             return reminders_json

@@ -18,6 +18,7 @@ def _chat_client_and_model(
     return openai_client, model_name
 
 
+
 def create_chat_completion(
     messages: List[Dict[str, Any]],
     openai_client,
