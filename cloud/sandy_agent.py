@@ -1668,9 +1668,8 @@ print(f"  SANDY_USER_CHAT_ID: {'SET' if SANDY_USER_CHAT_ID else 'EMPTY'} ({SANDY
 
 # Sandy Configuration
 try:
-    from sandy_config import NABEEL_INFO, SANDY_PERSONALITY, SYSTEM_PROMPT_ADDITION
+    from sandy_config import SANDY_PERSONALITY, SYSTEM_PROMPT_ADDITION
 except Exception:
-    NABEEL_INFO = ""
     SANDY_PERSONALITY = ""
     SYSTEM_PROMPT_ADDITION = ""
 
@@ -2230,10 +2229,10 @@ def save_session(session: Dict[str, Any]):
 # SMART LEARNING FUNCTIONS
 # ═══════════════════════════════════════════════════════════
 
-# بتحدد مستوى معرفة ساندي عن نبيل (مبتدئ، فضولي...)
+# بتحدد مستوى معرفة ساندي عن المستخدم (مبتدئ، فضولي...)
 
 def get_learning_saturation(memory: Dict[str, Any]) -> Dict[str, Any]:
-    """حسب مستوى معرفة Sandy عن نبيل"""
+    """حسب مستوى معرفة Sandy عن المستخدم"""
     facts = memory.get('facts', [])
     fact_types = {}
     
@@ -2884,11 +2883,11 @@ class SandyAgent:
         saturation = get_learning_saturation(self.memory)
         level = saturation['level']
         personality_mode = {
-            "BEGINNER": "🤔 فضولية وتسأل كتير - عم تتعرفي على نبيل",
+            "BEGINNER": "🤔 فضولية وتسأل كتير - عم تتعرفي على المستخدم",
             "CURIOUS": "🧠 بتتعلمي أساسيات - تسألي أسئلة ذكية",
             "LEARNING": "💭 بتفهمي أكتر - أسئلة أقل، فهم أعمق",
             "FAMILIAR": "🌟 صرتي صديقة حقيقية - نادراً ما تسألي",
-            "EXPERT": "💫 أنتِ والعارفة بكل شي عن نبيل - ما بتسألي إلا الضروري"
+            "EXPERT": "💫 أنتِ والعارفة بكل شي عن المستخدم - ما بتسألي إلا الضروري"
         }
         mode_text = personality_mode.get(level, "")
 
@@ -2910,8 +2909,6 @@ class SandyAgent:
         prompt = f"""أنتِ ساندي، وكيل ذكي متقدم يعمل 24/7.
 
 {SANDY_PERSONALITY}
-
-{NABEEL_INFO}
 
 {SYSTEM_PROMPT_ADDITION}
 
@@ -2935,7 +2932,7 @@ class SandyAgent:
 - التحكم بـ Sandy (الروبوت)
 
 الأسلوب:
-- اختصر إلا إذا طلب نبيل التفصيل
+- اختصر إلا إذا طلب المستخدم التفصيل
 - ابدأ برد بكلمة انجليزية واحدة توضح الحالة الشعورية بين قوسين: [happy], [think], etc.
 - كوني ودية وذكية في نفس الوقت
 """
@@ -2946,21 +2943,21 @@ class SandyAgent:
         saturation = get_learning_saturation(self.memory)
         level = saturation['level']
 
-        context = f"📚 السياق والحقائق المحفوظة عن نبيل (المستوى: {level}):\n"
+        context = f"📚 السياق والحقائق المحفوظة عن المستخدم (المستوى: {level}):\n"
 
         facts = self.memory.get('facts', [])
         if facts:
-            context += "\n✓ ما تعلمته عن نبيل:\n"
+            context += "\n✓ ما تعلمته عن المستخدم:\n"
             for fact in facts[-10:]:
                 context += f"  • {fact.get('text', '')[:80]}\n"
         else:
-            context += "\n⚠️ أنا ما تعلمت حاجة عن نبيل بعد! بدي أسأل كتير! 🤔\n"
+            context += "\n⚠️ أنا ما تعلمت حاجة عن المستخدم بعد! بدي أسأل كتير! 🤔\n"
 
         recent = self.memory.get('conversations', [])[-3:]
         if recent:
             context += "\nآخر محادثات:\n"
             for conv in recent:
-                context += f"🗣️ نبيل: {conv.get('user', '')[:60]}...\n"
+                context += f"🗣️ المستخدم: {conv.get('user', '')[:60]}...\n"
 
         return context
 
@@ -3038,7 +3035,7 @@ class SandyAgent:
                     add_reminder(reminder_text, remind_at)
                     if assistant_reply:
                         return get_sandy_reply(user_message, self.memory, assistant_reply)
-                    return get_sandy_reply(user_message, self.memory, f"[happy] تمام يا نبيل ✅ سجلت التذكير: {reminder_text}")
+                    return get_sandy_reply(user_message, self.memory, f"[happy] تمام ✅ سجلت التذكير: {reminder_text}")
 
                 if assistant_reply:
                     return get_sandy_reply(user_message, self.memory, assistant_reply)
@@ -3178,7 +3175,7 @@ def _is_duplicate_telegram_message(message) -> bool:
 
     return False
 
-# بتتأكد إذا المستخدم المرسل هو نبيل أو شخص مصرح له
+# بتتأكد إذا المستخدم المرسل هو المستخدم أو شخص مصرح له
 
 def _is_authorized_user(message) -> bool:
     return str(message.from_user.id) == SANDY_USER_CHAT_ID
@@ -3187,7 +3184,7 @@ def _is_authorized_user(message) -> bool:
 @telegram_bot.message_handler(commands=['start', 'help'])
 def handle_start(message):
     # أول ما المستخدم يكتب /start، ساندي بتعرف عن نفسها وبتشرح شو بتقدر تعمل
-    response = """[love] أهلاً يا نبيل! 💫
+    response = """[love] أهلاً  ! 💫
 أنا ساندي، وكيلك الذكي الجديد!
 الآن بأشتغل 24/7 بدون ما تحتاج تشغّل اللابتوب.
 
@@ -3210,7 +3207,7 @@ def handle_image_command(message):
         if _is_duplicate_telegram_message(message):
             return
         if not _is_authorized_user(message):
-            telegram_bot.reply_to(message, "معاف، بس نبيل بيقدر يتكلم معي 🔒")
+            telegram_bot.reply_to(message, "معاف، بس المستخدم بيقدر يتكلم معي 🔒")
             return
 
         chat_id = message.chat.id
@@ -3247,7 +3244,7 @@ def handle_photo(message):
         if _is_duplicate_telegram_message(message):
             return
         if not _is_authorized_user(message):
-            telegram_bot.reply_to(message, "معاف، بس نبيل بيقدر يتكلم معي 🔒")
+            telegram_bot.reply_to(message, "معاف، بس المستخدم بيقدر يتكلم معي 🔒")
             return
 
         chat_id = message.chat.id
@@ -3279,7 +3276,7 @@ def handle_video(message):
         if _is_duplicate_telegram_message(message):
             return
         if not _is_authorized_user(message):
-            telegram_bot.reply_to(message, "معاف، بس نبيل بيقدر يتكلم معي 🔒")
+            telegram_bot.reply_to(message, "معاف، بس المستخدم بيقدر يتكلم معي 🔒")
             return
 
         chat_id = message.chat.id
@@ -3317,7 +3314,7 @@ def handle_voice_or_audio(message):
         if _is_duplicate_telegram_message(message):
             return
         if not _is_authorized_user(message):
-            telegram_bot.reply_to(message, "معاف، بس نبيل بيقدر يتكلم معي 🔒")
+            telegram_bot.reply_to(message, "معاف، بس المستخدم بيقدر يتكلم معي 🔒")
             return
 
         chat_id = message.chat.id
@@ -3360,7 +3357,7 @@ def handle_message(message):
         chat_id = message.chat.id
 
         if not _is_authorized_user(message):
-            telegram_bot.reply_to(message, "معاف، بس نبيل بيقدر يتكلم معي 🔒")
+            telegram_bot.reply_to(message, "معاف، بس المستخدم بيقدر يتكلم معي 🔒")
             return
 
         if not user_message:
@@ -3420,7 +3417,7 @@ def daily_briefing():
     """Send daily briefing at 9 AM"""
     try:
         briefing = agent.think("قدملي ملخص يومي عن اللي صار")
-        telegram_bot.send_message(SANDY_USER_CHAT_ID, f"[morning] صباح الخير يا نبيل! ☀️\n\n{briefing}", parse_mode=None)
+        telegram_bot.send_message(SANDY_USER_CHAT_ID, f"[morning] صباح الخير  ! ☀️\n\n{briefing}", parse_mode=None)
     except Exception as e:
         print(f"[Briefing] Error: {e}")
 
