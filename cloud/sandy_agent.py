@@ -101,9 +101,7 @@ from app.api.telegram_runtime import (
     prepare_telegram_polling,
     set_telegram_webhook,
 )
-
-
-
+from app.api.webhook import create_telegram_webhook_app
 
 # Try to import Chroma for smart memory
 try:
@@ -239,7 +237,6 @@ SESSION_FILE = MEMORY_DIR / "sandy_session_memory.json"
 TASKS_FILE = TASKS_DIR / "daily_plan.json"
 REMINDERS_FILE = TASKS_DIR / "reminders.json"
 
-from flask import Flask, request, abort
 
 # ═══════════════════════════════════════════════════════════
 # INITIALIZATION
@@ -722,24 +719,11 @@ TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN", "").strip()
 RAILWAY_URL = os.getenv("RAILWAY_URL", "").strip()
 WEBHOOK_PATH = f"/webhook/{TELEGRAM_SECRET_TOKEN}" if TELEGRAM_SECRET_TOKEN else "/webhook"
 
-app = Flask(__name__)
-
-@app.route(WEBHOOK_PATH, methods=["POST"])
-def telegram_webhook():
-    # تحقق من التوكن السري (Telegram header)
-    if TELEGRAM_SECRET_TOKEN:
-        header_token = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if header_token != TELEGRAM_SECRET_TOKEN:
-            abort(403)
-    if request.method == "POST":
-        try:
-            telegram_bot.process_new_updates([
-                telebot.types.Update.de_json(request.stream.read().decode("utf-8"))
-            ])
-        except Exception as e:
-            print(f"[Webhook] ❌ Error: {e}")
-        return "OK", 200
-    return "Method Not Allowed", 405
+app = create_telegram_webhook_app(
+    telegram_bot=telegram_bot,
+    webhook_path=WEBHOOK_PATH,
+    telegram_secret_token=TELEGRAM_SECRET_TOKEN,
+)
 
 if __name__ == "__main__":
     if APP_ENV == "local" or RUN_MODE == "polling":
