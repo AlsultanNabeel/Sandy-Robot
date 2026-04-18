@@ -56,8 +56,7 @@ def summarize_and_store(user_text: str, ai_reply: str):
     now = datetime.now()
     timestamp = now.isoformat()
     date_str = now.strftime('%Y-%m-%d')
-    doc = f'نبيل: {user_text}\nساندي: {ai_reply}'
-
+    doc = f'User: {user_text}\nSandy: {ai_reply}'
     if USE_CHROMA:
         doc_id = f"raw_{now.strftime('%Y%m%d_%H%M%S_%f')}"
         raw_col.add(documents=[doc], metadatas=[{'timestamp': timestamp, 'date': date_str}], ids=[doc_id])

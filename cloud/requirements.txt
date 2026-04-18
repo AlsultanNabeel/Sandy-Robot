@@ -1,5 +1,3 @@
-# من أجل التوافق مع typing
-from typing import Optional
 # Text-to-Speech and utilities
 azure-cognitiveservices-speech>=1.41.1
 emoji>=2.0.0
@@ -8,8 +6,9 @@ Flask>=2.2.0
 apscheduler==3.11.2
 edge-tts==7.2.3
 openai==2.26.0
-pymongo>=4.6.0
 pydub==0.25.1
+pymongo>=4.6.0
+
 pyTelegramBotAPI==4.32.0
 python-dotenv==1.1.1
 certifi>=2024.0.0

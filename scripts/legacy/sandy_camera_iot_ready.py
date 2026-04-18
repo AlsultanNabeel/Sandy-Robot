@@ -14,7 +14,7 @@ _DEFAULT_CONFIG = {
     "faces_db": "faces/faces_db.pkl",
     "snapshot_token": "",
     "control_token": "",
-    "http_user": "nabeel",
+    "http_user": "Owner",
     "http_pass": "change-me-camera-pass",
     "secret_passphrase": "ساندي الوضع الكامل",
     "face_match_threshold": 0.5,
@@ -36,7 +36,7 @@ _DEFAULT_CONFIG = {
     "hog_upsample": 0,
     "clahe_clip_limit": 2.0,
     "clahe_tile_grid": 8,
-    "owner_names": ["Nabeel"]
+    "owner_names": ["Owner"]
 }
 
 _eye_close_timer = None
@@ -51,9 +51,9 @@ def _load_camera_config():
 
 def _parse_owner_names(value: str | None) -> list[str]:
     if not value:
-        return ["Nabeel"]
+        return ["Owner"]
     names = [name.strip() for name in value.split(",") if name.strip()]
-    return names or ["Nabeel"]
+    return names or ["Owner"]
 
 
 def reload_camera_config():
@@ -96,7 +96,7 @@ def reload_camera_config():
     HOG_UPSAMPLE = int(_CAMERA_CONFIG.get("hog_upsample", 0))
     CLAHE_CLIP_LIMIT = float(_CAMERA_CONFIG.get("clahe_clip_limit", 2.0))
     CLAHE_TILE_GRID = max(2, int(_CAMERA_CONFIG.get("clahe_tile_grid", 8)))
-    OWNER_NAMES = set(_parse_owner_names(os.getenv("CAM_OWNER_NAMES")) or _CAMERA_CONFIG.get("owner_names", ["Nabeel"]))
+    OWNER_NAMES = set(_parse_owner_names(os.getenv("CAM_OWNER_NAMES")) or _CAMERA_CONFIG.get("owner_names", ["Owner"]))
     _clahe = cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=(CLAHE_TILE_GRID, CLAHE_TILE_GRID))
     _recent_faces = deque(maxlen=RECENT_FACES_LIMIT)
 

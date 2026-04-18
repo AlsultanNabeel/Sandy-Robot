@@ -36,10 +36,21 @@ sandy_topics_fallback.json
 sandy_raw_fallback.json
 daily_plan.json
 reminders.json
-.python_packages
-.venv
+.python_packages/
+.venv/
 wake_word_training/
 wake_word_model.pkl
 # Google Cloud credentials (لا ترفع أبداً)
 sandy-gcloud-key.json
 
+data/
+*.log
+.venv/
+venv/
+*.env
+*.bak
+*.tmp
+*.sqlite*
+*.zip
+exports/
+.vscode/
