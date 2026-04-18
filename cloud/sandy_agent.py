@@ -13,6 +13,7 @@ import re
 import io
 import base64
 import tempfile
+from pymongo import results
 import requests
 from collections import deque
 from datetime import datetime, timedelta
@@ -76,8 +77,10 @@ MOOD_TTS_VOICES = {
     "tired": os.getenv("GOOGLE_TTS_VOICE_TIRED", "ar-XA-Chirp3-HD-Aoede").strip(),
     "serious": os.getenv("GOOGLE_TTS_VOICE_SERIOUS", "ar-XA-Chirp3-HD-Despina").strip(),
 }
+# بتحول النص لصوت باستخدام Google TTS حسب المزاج والستايل، وبترجع الصوت كـ bytes
+
 def synthesize_voice_with_google(text: str, mood: str = "neutral", style: str = "normal") -> Optional[bytes]:
-    """Synthesize speech with Google Cloud TTS using env-configured voice and return audio bytes."""
+    # بتحول النص لصوت باستخدام Google TTS حسب المزاج والستايل، وبترجع الصوت كـ bytes
     if not text or not GOOGLE_TTS_AVAILABLE:
         return None
 
@@ -127,17 +130,10 @@ def synthesize_voice_with_google(text: str, mood: str = "neutral", style: str = 
 
 
 # ========== SANDY PERSONALITY ENGINE ==========
+# بتخلي الذكاء الاصطناعي يحزر مزاج ساندي وستايلها من رسالة المستخدم والسياق
+
 def infer_mood_and_style_from_ai(user_message: str, memory: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Let AI infer Sandy's mood/style from the full user message context.
-    Returns:
-    {
-        "mood": "...",
-        "style": "...",
-        "directed_at_sandy": true/false,
-        "confidence": 0.0-1.0
-    }
-    """
+    # بتخلي الذكاء الاصطناعي يحزر مزاج ساندي وستايلها من رسالة المستخدم والسياق
     try:
         previous_state = memory.get("sandy_state", {})
         previous_mood = previous_state.get("mood", "neutral")
@@ -199,12 +195,1228 @@ def infer_mood_and_style_from_ai(user_message: str, memory: Dict[str, Any]) -> O
     except Exception as e:
         print(f"[MoodAI] ⚠️ Failed to infer mood/style: {e}")
         return None
+
+# بتبحث في الإنترنت عن أي شيء بدك إياه وترجع النتائج بشكل مبسط
+
+def search_exa(query: str, num_results: int = 10) -> List[Dict[str, Any]]:
+    # بتبحث في الإنترنت عن أي شيء بدك إياه وترجع النتائج بشكل مبسط
+    if not EXA_API_KEY:
+        print("[Exa] ⚠️ EXA_API_KEY missing")
+        return []
+
+    try:
+        url = "https://api.exa.ai/search"
+        headers = {
+            "x-api-key": EXA_API_KEY,
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "query": query,
+            "numResults": num_results,
+            "type": "auto",
+            "contents": {
+                "text": True
+            }
+        }
+
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+
+        results = []
+        for item in data.get("results", []):
+            results.append({
+                "title": str(item.get("title") or "").strip(),
+                "url": str(item.get("url") or "").strip(),
+                "text": str(item.get("text") or "").strip(),
+                "published_date": str(item.get("publishedDate") or "").strip(),
+            })
+        print(f"[Exa] ✅ Found {len(results)} results for query: {query}")
+        return results
+
+    except Exception as e:
+        print(f"[Exa] ❌ Search failed: {e}")
+        return []
+
+
+
+# هاي الدالة بتجيب محتوى الصفحة نفسها من Exa بعد ما نعرف الرابط، عشان نقدر نحلل التفاصيل بدل ما نعتمد فقط على العنوان والـ snippet.
+def get_exa_page_content(url: str) -> Dict[str, Any]:
+    if not EXA_API_KEY:
+        print("[Exa] ⚠️ EXA_API_KEY missing")
+        return {}
+
+    try:
+        api_url = "https://api.exa.ai/contents"
+        headers = {
+            "x-api-key": EXA_API_KEY,
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "urls": [url],
+            "text": True
+        }
+
+        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+
+        results = data.get("results", [])
+        if not results:
+            return {}
+
+        item = results[0]
+        return {
+            "url": str(item.get("url") or "").strip(),
+            "title": str(item.get("title") or "").strip(),
+            "text": str(item.get("text") or "").strip(),
+        }
+
+    except Exception as e:
+        print(f"[Exa] ❌ Contents fetch failed for {url}: {e}")
+        return {}
+
+
+
+# هاي الدالة بتاخد النص الخام من الصفحة وبتخلي الذكاء الاصطناعي يطلع منه معلومات مرتبة ومختصرة حسب نوع البحث.
+def extract_structured_page_data(page_content: Dict[str, Any], research_type: str = "general") -> Dict[str, Any]:
+    if not page_content:
+        return {}
+
+    page_text = (page_content.get("text", "") or "").strip()
+    page_title = page_content.get("title", "")
+    page_url = page_content.get("url", "")
+
+    effective_research_type = research_type
+
+    education_hints = [
+        "master", "masters", "máster", "universitario", "universidad", "university",
+        "robotics", "robótica", "robotica", "automática", "automatica",
+        "admission", "credits", "ects", "preinscripción", "preinscripcion"
+    ]
+
+    combined_text = f"{page_title}\n{page_url}\n{page_text[:2000]}".lower()
+
+    if research_type == "general" and any(hint in combined_text for hint in education_hints):
+        effective_research_type = "education"
+
+    if not page_text:
+        return {}
+
+    if effective_research_type == "education":
+        extraction_instruction = """
+Extract the following fields from this official education/program page:
+- institution_name
+- program_name
+- degree_level
+- country
+- city
+- language_of_instruction
+- admission_requirements
+- english_requirement
+- requires_ielts_or_toefl (true/false/unknown)
+- tuition
+- deadline
+- application_url
+- official_program_url
+- summary
+
+Return valid JSON only.
+"""
+    elif effective_research_type == "travel":
+        extraction_instruction = """
+Extract the following fields from this travel/hotel/visa page:
+- place_name
+- country
+- city
+- type
+- price
+- booking_link
+- visa_info
+- important_requirements
+- summary
+
+Return valid JSON only.
+"""
+    elif effective_research_type == "product":
+        extraction_instruction = """
+Extract the following fields from this product page:
+- product_name
+- brand
+- price
+- currency
+- availability
+- key_features
+- pros
+- cons
+- official_url
+- summary
+
+Return valid JSON only.
+"""
+    elif effective_research_type == "news":
+        extraction_instruction = """
+Extract the following fields from this news page:
+- headline
+- publisher
+- published_date
+- key_points
+- summary
+- source_url
+
+Return valid JSON only.
+"""
+    else:
+        extraction_instruction = """
+Extract the following fields from this page:
+- title
+- main_entity
+- important_requirements
+- price_or_cost
+- relevant_dates
+- official_link
+- summary
+
+Return valid JSON only.
+"""
+
+    try:
+        response = create_chat_completion(
+            messages=[
+                {
+                    "role": "system",
+                    "content": extraction_instruction
+                },
+                {
+                    "role": "user",
+                    "content": f"PAGE TITLE: {page_title}\nPAGE URL: {page_url}\n\nPAGE TEXT:\n{page_text[:12000]}"
+                }
+            ],
+            temperature=0,
+            max_tokens=900,
+            response_format={"type": "json_object"},
+            prefer_azure=True
+        )
+
+        parsed = json.loads(response.choices[0].message.content or "{}")
+        return parsed
+
+    except Exception as e:
+        print(f"[Research] ❌ Structured extraction failed for {page_url}: {e}")
+        return {
+            "title": page_title,
+            "official_link": page_url,
+            "summary": (page_text[:700] + "...") if len(page_text) > 700 else page_text
+        }
+
+
+def normalize_education_page_data(page_data: Dict[str, Any], source_url: str = "") -> Dict[str, Any]:
+    if not isinstance(page_data, dict):
+        return {}
+
+    cleaned = dict(page_data)
+
+    def clean_value(value: Any) -> str:
+        return str(value or "").strip()
+
+    institution_name = clean_value(cleaned.get("institution_name"))
+    program_name = clean_value(cleaned.get("program_name"))
+    degree_level = clean_value(cleaned.get("degree_level"))
+    country = clean_value(cleaned.get("country"))
+    city = clean_value(cleaned.get("city"))
+    language_of_instruction = clean_value(cleaned.get("language_of_instruction"))
+    admission_requirements = clean_value(cleaned.get("admission_requirements"))
+    english_requirement = clean_value(cleaned.get("english_requirement"))
+    requires_ielts_or_toefl = clean_value(cleaned.get("requires_ielts_or_toefl"))
+    tuition = clean_value(cleaned.get("tuition"))
+    deadline = clean_value(cleaned.get("deadline"))
+    application_url = clean_value(cleaned.get("application_url"))
+    official_program_url = clean_value(cleaned.get("official_program_url"))
+    summary = clean_value(cleaned.get("summary"))
+
+    # توحيد القيم المجهولة
+    unknown_values = {
+        "unknown", "not specified", "not specified.", "n/a", "none",
+        "no especificado", "no especificado en la página.", "no especificado en la pagina.",
+        "desconocido"
+    }
+
+    if language_of_instruction.lower() in unknown_values:
+        language_of_instruction = ""
+    if requires_ielts_or_toefl.lower() in unknown_values:
+        requires_ielts_or_toefl = ""
+    if tuition.lower() in unknown_values:
+        tuition = ""
+    if deadline.lower() in unknown_values:
+        deadline = ""
+
+    # تصحيح أسماء دول/مدن غير منطقية لبعض جامعات إسبانيا
+    source_url_lower = source_url.lower()
+    institution_lower = institution_name.lower()
+
+    if (
+        "valencia" in institution_lower
+        or "universitat politècnica de valència" in institution_lower
+        or "upv.es" in source_url_lower
+    ):
+        if country.lower() not in {"spain", "españa", "espana", ""}:
+            country = "Spain"
+        if city.lower() not in {"valencia", ""}:
+            city = "Valencia"
+
+    if (
+        "universidad de alicante" in institution_lower
+        or "ua.es" in source_url_lower
+    ):
+        if country.lower() not in {"spain", "españa", "espana", ""}:
+            country = "Spain"
+        if city.lower() not in {"alicante", ""}:
+            city = "Alicante"
+
+    if (
+        "carlos iii" in institution_lower
+        or "uc3m.es" in source_url_lower
+    ):
+        if country.lower() not in {"spain", "españa", "espana", ""}:
+            country = "Spain"
+
+    cleaned["institution_name"] = institution_name
+    cleaned["program_name"] = program_name
+    cleaned["degree_level"] = degree_level
+    cleaned["country"] = country
+    cleaned["city"] = city
+    cleaned["language_of_instruction"] = language_of_instruction
+    cleaned["admission_requirements"] = admission_requirements
+    cleaned["english_requirement"] = english_requirement
+    cleaned["requires_ielts_or_toefl"] = requires_ielts_or_toefl
+    cleaned["tuition"] = tuition
+    cleaned["deadline"] = deadline
+    cleaned["application_url"] = application_url
+    cleaned["official_program_url"] = official_program_url
+    cleaned["summary"] = summary
+
+    return cleaned
+
+
+
+# دالة تحدد نوع البحث قب البحث
+def detect_research_type(message: str) -> str:
+    text = (message or "").strip().lower()
+
+    education_triggers = [
+        "جامعة", "جامعات", "ماجستير", "ماجيستير", "ماستر", "بكالوريوس", "دكتوراه",
+        "منحة", "قبول", "تقديم", "admission", "university", "universidad",
+        "master", "masters", "phd", "bachelor", "degree",
+        "ielts", "toefl",
+        "روبوت", "روبوتكس", "robotics", "automation", "automatica", "robótica", "robotica"
+    ]
+
+    travel_triggers = [
+        "سافر", "سفر", "فندق", "رحلة", "تأشيرة", "فيزا", "hotel", "trip", "travel", "visa"
+    ]
+
+    product_triggers = [
+        "اشتري", "اشتريلي", "منتج", "منتجات", "سعر", "مقارنة أسعار",
+        "buy", "price", "product", "products", "compare"
+    ]
+
+    news_triggers = [
+        "خبر", "أخبار", "اليوم", "آخر", "اخر", "latest", "news", "update", "updates"
+    ]
+
+    if any(word in text for word in education_triggers):
+        return "education"
+
+    if any(word in text for word in travel_triggers):
+        return "travel"
+
+    if any(word in text for word in product_triggers):
+        return "product"
+
+    if any(word in text for word in news_triggers):
+        return "news"
+
+    return "general"
+
+
+# هاي الدالة بتحاول تفهم من كلام المستخدم كم نتيجة بده بالزبط، وإذا ما حدد عدد بترجع رقم افتراضي.
+def extract_requested_result_count(message: str, default: int = 5) -> int:
+    text = (message or "").strip().lower()
+
+    arabic_number_words = {
+        "واحد": 1,
+        "وحدة": 1,
+        "واحدة": 1,
+        "اثنين": 2,
+        "اتنين": 2,
+        "اثنتين": 2,
+        "ثلاثة": 3,
+        "ثلاث": 3,
+        "اربعة": 4,
+        "اربع": 4,
+        "أربع": 4,
+        "أربعة": 4,
+        "خمسة": 5,
+        "ستة": 6,
+        "سبعة": 7,
+        "ثمانية": 8,
+        "تسعة": 9,
+        "عشرة": 10,
+    }
+
+    # أولاً: لو فيه رقم مكتوب مباشرة
+    match = re.search(r"\b(\d+)\b", text)
+    if match:
+        try:
+            value = int(match.group(1))
+            return max(1, min(value, 20))
+        except Exception:
+            pass
+
+    # ثانياً: لو العدد مكتوب كلمات
+    for word, value in arabic_number_words.items():
+        if word in text:
+            return value
+
+    # ثالثاً: لو الطلب بصيغة مفردة واضحة
+    single_result_triggers = [
+        "أفضل جامعة",
+        "افضل جامعة",
+        "أرخص جامعة",
+        "ارخص جامعة",
+        "جامعة وحدة",
+        "جامعة واحدة",
+        "صفحة وحدة",
+        "صفحة واحدة",
+        "أفضل صفحة",
+        "افضل صفحة",
+        "أرخص صفحة",
+        "ارخص صفحة",
+        "best university",
+        "cheapest university",
+        "one university",
+        "single university",
+        "one page",
+        "single page",
+        "best page",
+        "cheapest page",
+    ]
+
+    lowered = text.lower()
+    if any(trigger.lower() in lowered for trigger in single_result_triggers):
+        return 1
+
+    return default
+
+
+# هاي الدالة بتحاول تميز إذا الرابط غالباً رسمي أو تابع لجهة أصلية، وبتستبعد روابط التجميع والمواقع العامة.
+def is_official_source_url(url: str, research_type: str = "general") -> bool:
+    if not url:
+        return False
+
+    lowered_url = url.lower()
+
+    blocked_domains = [
+        "educations.com",
+        "educations.es",
+        "mastersportal.com",
+        "masterstudies.com",
+        "findamasters.com",
+        "studyportals.com",
+        "bachelorstudies.com",
+        "phdstudies.com",
+        "financialmagazine.es",
+        "universoptimum.com",
+        "yaq.es",
+        "linkedin.com",
+        "facebook.com",
+        "instagram.com",
+        "youtube.com",
+        "medium.com",
+        "reddit.com",
+        "quora.com",
+        "wikipedia.org",
+        "topuniversities.com",
+        "timeshighereducation.com",
+        "shiksha.com",
+        "ielts.org",
+        "ielts.idp.com",
+    ]
+
+    if any(domain in lowered_url for domain in blocked_domains):
+        return False
+
+    if research_type == "education":
+        official_hints = [
+            ".edu", ".ac.", ".ac.uk",
+            "universidad", "university",
+            "/master", "/masters", "/graduate", "/admissions", "/program",
+            "/postgrado", "/estudio", "/degree", "/degrees"
+        ]
+
+        # إذا الرابط فيه مؤشرات أكاديمية/برامج، اعتبره مرشح رسمي
+        if any(hint in lowered_url for hint in official_hints):
+            return True
+
+        # إذا الدومين يبدو تابعًا لموقع رسمي أوروبي/جامعي وليس من المواقع المحظورة
+        if lowered_url.startswith("https://www.") or lowered_url.startswith("https://"):
+            if ".es/" in lowered_url or lowered_url.endswith(".es") or ".edu/" in lowered_url:
+                return True
+
+        return False
+
+    if research_type == "travel":
+        official_hints = [
+            ".gov", ".gob", ".eu",
+            "official", "visit", "tourism",
+            "booking.com", "airbnb.com", "expedia.com"
+        ]
+        return any(hint in lowered_url for hint in official_hints)
+
+    if research_type == "product":
+        official_hints = [
+            "amazon.", "mediamarkt.", "coolblue.", "bol.", "apple.", "sony.", "dell.", "ikea."
+        ]
+        return any(hint in lowered_url for hint in official_hints)
+
+    if research_type == "news":
+        official_hints = [
+            ".com", ".org", ".net"
+        ]
+        return any(hint in lowered_url for hint in official_hints)
+
+    return True
+
+# هاي الدالة بتنظف الرابط بشكل بسيط حتى نقدر نكتشف إذا نفس الصفحة مكررة بنسخة لغة ثانية أو بصيغة مختلفة.
+def normalize_result_url(url: str) -> str:
+    url = str(url or "").strip().lower()
+    url = url.rstrip("/")
+
+    replacements = [
+        "/en",
+        "/es",
+        "/ar",
+        "/fr",
+        "/de",
+        "/ca",
+        "/eu"
+    ]
+
+    for suffix in replacements:
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+
+    # شيل query params إذا موجودة
+    url = url.split("?")[0]
+
+    return url
+
+
+
+# هاي الدالة بتنظف اسم البرنامج عشان نقدر نكشف التكرار حتى لو الاسم طالع بلغة ثانية أو بصياغة مختلفة شوي.
+def normalize_program_name(name: str) -> str:
+    name = str(name or "").strip().lower()
+
+    replacements = {
+        "robótica": "robotics",
+        "robotica": "robotics",
+        "automatización": "automation",
+        "automatizacion": "automation",
+        "automática": "automation",
+        "automatica": "automation",
+        "máster": "master",
+        "master's": "master",
+        "masters": "master",
+    }
+
+    for old, new in replacements.items():
+        name = name.replace(old, new)
+
+    name = re.sub(r"[^a-z0-9\s]", " ", name)
+    name = re.sub(r"\s+", " ", name).strip()
+    return name
+
+
+# هاي الدالة بتبني مفتاح تقريبي للنتيجة حتى نعرف إذا نفس الجامعة/البرنامج طالع أكثر من مرة.
+def build_result_dedup_key(item: Dict[str, Any]) -> str:
+    page_data = item.get("page_data", {}) or {}
+
+    institution = str(page_data.get("institution_name") or "").strip().lower()
+    program = normalize_program_name(page_data.get("program_name") or item.get("source_title") or "")
+    source_url = normalize_result_url(item.get("source_url") or "")
+    source_domain = ""
+
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(source_url)
+        source_domain = parsed.netloc.replace("www.", "").strip().lower()
+        source_path = parsed.path.strip().lower()
+    except Exception:
+        source_domain = ""
+        source_path = ""
+
+    if institution and program:
+        return f"{institution}::{program}"
+
+    if source_domain and program:
+        return f"{source_domain}::{program}"
+
+    if source_domain and source_path:
+        return f"{source_domain}::{source_path}"
+
+    if source_url:
+        return source_url
+
+    return normalize_program_name(item.get("source_title") or "")
+
+
+# هاي الدالة بتشيل النتائج المكررة، مثل نفس الجامعة أو نفس البرنامج إذا طلع بأكثر من رابط أو لغة.
+def deduplicate_research_results(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    unique_results = []
+    seen_keys = set()
+
+    for item in results:
+        key = build_result_dedup_key(item)
+        if not key:
+            continue
+
+        if key in seen_keys:
+            continue
+
+        seen_keys.add(key)
+        unique_results.append(item)
+
+    return unique_results
+
     
+
+    # هاي الدالة بتفهم حالة IELTS/TOEFL بشكل أوضح: مؤكد لا، مؤكد نعم، أو غير واضح.
+def classify_ielts_requirement(value: str) -> str:
+    text = str(value or "").strip().lower()
+
+    if text in ["false", "no", "لا", "not required", "not needed"]:
+        return "no"
+
+    if text in ["true", "yes", "نعم", "required", "needed"]:
+        return "yes"
+
+    return "unknown"
+
+
+# هاي الدالة بتفلتر النتائج حسب طلب المستخدم، مثل بدون IELTS أو فقط الإنجليزية.
+def filter_research_results(results: List[Dict[str, Any]], preference: Dict[str, Any]) -> List[Dict[str, Any]]:
+    filtered = []
+
+    for item in results:
+        page_data = item.get("page_data", {}) or {}
+
+        language_of_instruction = str(page_data.get("language_of_instruction") or "").strip().lower()
+        requires_ielts_or_toefl = str(page_data.get("requires_ielts_or_toefl") or "").strip().lower()
+        ielts_status = classify_ielts_requirement(requires_ielts_or_toefl)
+        source_url = str(item.get("source_url") or "").strip().lower()
+
+        if preference.get("english_only"):
+            if "english" not in language_of_instruction and "الإنجليزية" not in language_of_instruction and "الانجليزية" not in language_of_instruction:
+                continue
+
+        if preference.get("no_ielts"):
+            if ielts_status != "no":
+                continue
+
+        if preference.get("official_only"):
+            if not is_official_source_url(source_url, research_type="education"):
+                continue
+
+        filtered.append(item)
+
+    return filtered
+
+
+
+# هاي الدالة بتحاول تطلع رقم تقريبي من حقل الرسوم حتى نقدر نرتب الأرخص بشكل أحسن.
+# هاي الدالة بتحاول تطلع رقم من الرسوم، وإذا ما قدرت بترجع رقم كبير جدًا بدل ما ترجع None أو تخرب الفرز.
+def parse_tuition_value(tuition_text: str) -> float:
+    text = str(tuition_text or "").strip().lower()
+
+    if not text:
+        return 999999999.0
+
+    cleaned = (
+        text.replace(",", "")
+        .replace("€", "")
+        .replace("$", "")
+        .replace("eur", "")
+        .replace("usd", "")
+    )
+
+    match = re.search(r'(\d+(?:\.\d+)?)', cleaned)
+    if not match:
+        return 999999999.0
+
+    try:
+        return float(match.group(1))
+    except Exception:
+        return 999999999.0
+
+
+# هاي الدالة بترتب النتائج بشكل بسيط حسب طلب المستخدم: أفضل أو أرخص.
+def rank_research_results(results: List[Dict[str, Any]], preference: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def result_score(item: Dict[str, Any]) -> tuple:
+        page_data = item.get("page_data", {}) or {}
+
+        source_url = str(item.get("source_url") or "").strip().lower()
+        institution = str(page_data.get("institution_name") or "").strip()
+        program = str(page_data.get("program_name") or "").strip()
+        tuition = str(page_data.get("tuition") or "").strip().lower()
+        tuition_value = parse_tuition_value(tuition)
+        ielts_status = classify_ielts_requirement(page_data.get("requires_ielts_or_toefl") or "")
+
+        official_score = 1 if is_official_source_url(source_url, research_type="education") else 0
+        metadata_score = 0
+        if institution:
+            metadata_score += 1
+        if program:
+            metadata_score += 1
+        if tuition:
+            metadata_score += 1
+
+        if preference.get("cheapest_only"):
+            return (
+                int(tuition_value),
+                -int(official_score),
+                -int(metadata_score)
+            )
+
+        if preference.get("no_ielts"):
+            ielts_rank = {
+                "no": 2,
+                "unknown": 1,
+                "yes": 0
+            }.get(ielts_status, 0)
+
+            return (
+                int(official_score),
+                int(ielts_rank),
+                int(metadata_score)
+            )
+
+        return (
+            int(official_score),
+            int(metadata_score)
+        )
+    
+    if preference.get("cheapest_only"):
+        return sorted(results, key=result_score)
+
+    return sorted(results, key=result_score, reverse=True)
+
+
+
+# هاي الدالة بتختار أفضل نتيجة وحدة وبتعطي سبب مختصر وواضح ليش انختارت.
+def build_winner_summary(results: List[Dict[str, Any]], preference: Dict[str, Any]) -> str:
+    if not results:
+        return "[think] ما لقيت نتيجة واضحة أقدر أختارها كأفضل خيار."
+
+    def localize_value(value: Any, field_type: str = "") -> str:
+        if isinstance(value, dict):
+            if field_type == "deadline":
+                parts = []
+                for k, v in value.items():
+                    key = str(k).replace("_", " ").strip()
+                    val = str(v).strip()
+                    if val:
+                        parts.append(f"{key}: {val}")
+                return " | ".join(parts) if parts else "غير مذكور بوضوح"
+            value = str(value)
+
+        if isinstance(value, list):
+            value = " | ".join(str(x).strip() for x in value if str(x).strip())
+
+        value = str(value or "").strip()
+        lowered = value.lower()
+
+        unknown_values = {
+            "unknown",
+            "not specified",
+            "not specified.",
+            "not specified in the provided text",
+            "not specified in the provided text.",
+            "n/a",
+            "none",
+            "no especificado",
+            "no especificado en la página",
+            "no especificado en la página.",
+            "no especificado en la pagina",
+            "no especificado en la pagina.",
+            "desconocido"
+        }
+
+        if field_type == "deadline" and value.startswith("{") and value.endswith("}"):
+            try:
+                parsed = json.loads(value.replace("'", '"'))
+                if isinstance(parsed, dict):
+                    parts = []
+                    for k, v in parsed.items():
+                        key = str(k).replace("_", " ").strip()
+                        val = str(v).strip()
+                        if val:
+                            parts.append(f"{key}: {val}")
+                    return " | ".join(parts) if parts else "غير مذكور بوضوح"
+            except Exception:
+                pass
+
+        if lowered in unknown_values:
+            if field_type == "tuition":
+                return "غير مذكورة بوضوح"
+            if field_type == "deadline":
+                return "غير مذكور بوضوح"
+            return "غير واضح"
+
+        if lowered in {"yes", "true", "required"}:
+            return "نعم"
+
+        if lowered in {"no", "false", "not required"}:
+            return "لا"
+
+        return value
+
+    winner = results[0]
+    page_data = winner.get("page_data", {}) or {}
+
+    title = (
+        page_data.get("program_name")
+        or page_data.get("product_name")
+        or page_data.get("place_name")
+        or page_data.get("headline")
+        or page_data.get("title")
+        or winner.get("source_title")
+        or "بدون عنوان"
+    )
+
+    institution = str(page_data.get("institution_name") or "").strip()
+    summary = str(page_data.get("summary") or "").strip()
+    url = str(page_data.get("official_program_url") or winner.get("source_url") or "").strip()
+
+    language_of_instruction = localize_value(page_data.get("language_of_instruction"), "language")
+    requires_ielts_or_toefl = localize_value(page_data.get("requires_ielts_or_toefl"), "ielts")
+    tuition = localize_value(page_data.get("tuition"), "tuition")
+    deadline = localize_value(page_data.get("deadline"), "deadline")
+
+    reasons = []
+
+    if preference.get("best_only"):
+        reasons.append("اخترته لأنه من أوضح وأقوى النتائج الرسمية المتوفرة")
+    if preference.get("cheapest_only"):
+        reasons.append("اخترته لأنه ظهر كأفضل خيار متاح من ناحية الرسوم أو وضوح تكلفة الدراسة")
+    if preference.get("no_ielts"):
+        reasons.append("اخترته لأنه يبدو الأنسب من ناحية شرط IELTS/TOEFL")
+    if preference.get("english_only"):
+        reasons.append("اخترته لأنه مناسب من ناحية لغة الدراسة")
+
+    if language_of_instruction and language_of_instruction != "غير واضح":
+        reasons.append(f"لغة الدراسة: {language_of_instruction}")
+    if requires_ielts_or_toefl and requires_ielts_or_toefl != "غير واضح":
+        reasons.append(f"IELTS/TOEFL: {requires_ielts_or_toefl}")
+    if tuition and tuition != "غير مذكورة بوضوح":
+        reasons.append(f"الرسوم: {tuition}")
+    if deadline and deadline != "غير مذكور بوضوح":
+        reasons.append(f"الموعد النهائي: {deadline}")
+
+    lines = ["[think] اخترت لك هذا الخيار:\n"]
+    lines.append(f"البرنامج: {str(title).strip()}")
+
+    if institution:
+        lines.append(f"الجامعة: {institution}")
+
+    if summary:
+        lines.append(f"الملخص: {summary}")
+
+    if reasons:
+        lines.append("سبب الاختيار:")
+        for reason in reasons:
+            lines.append(f"- {reason}")
+
+    if url:
+        lines.append(f"الرابط: {url}")
+
+    return "\n".join(lines)
+
+
+# هاي الدالة بتحاول تفهم شو نوع الفلترة أو المقارنة اللي بدها ياها من كلام المستخدم.
+def detect_research_preference(message: str) -> Dict[str, Any]:
+    text = str(message or "").strip().lower()
+
+    return {
+        "best_only": any(x in text for x in [
+            "أفضل", "افضل", "best", "top", "الأقوى", "الاقوى"
+        ]),
+        "cheapest_only": any(x in text for x in [
+            "أرخص", "ارخص", "cheapest", "lowest price", "lowest tuition"
+        ]),
+        "no_ielts": any(x in text for x in [
+            "بدون ielts", "ما يطلب ielts", "بدون توفل", "ما يطلب توفل",
+            "بدون toefl", "no ielts", "no toefl"
+        ]),
+        "english_only": any(x in text for x in [
+            "بالانجليزي", "بالإنجليزي", "باللغة الإنجليزية",
+            "english", "english only", "in english"
+        ]),
+        "official_only": any(x in text for x in [
+            "رسمي", "رسمية", "official", "official only"
+        ]),
+    }
+
+
+# بتدور على برامج جامعية، بتفلتر النتائج الرسمية، وبتسحب معلومات عن كل برنامج
+def run_research_pipeline(user_query: str, research_type: str = "general", requested_count: int = 5) -> List[Dict[str, Any]]:
+    print(f"[Research] 🔍 Starting {research_type} research for: {user_query}")
+
+    exa_results = search_exa(user_query, num_results=WEB_RESEARCH_MAX_CANDIDATES)
+    if not exa_results:
+        return []
+
+    candidates = []
+
+    for item in exa_results:
+        url = item.get("url", "")
+        if not url:
+            continue
+
+        if is_official_source_url(url, research_type=research_type):
+            candidates.append(item)
+
+    # إذا الفلترة كانت شديدة وما رجع شيء، خذ fallback بعد انتهاء اللوب
+    if not candidates:
+        print("[Research] ⚠️ No official-looking candidates found after filtering")
+
+        soft_candidates = []
+        soft_blocked = [
+            "educations.com",
+            "educations.es",
+            "mastersportal.com",
+            "masterstudies.com",
+            "findamasters.com",
+            "studyportals.com",
+            "financialmagazine.es",
+            "universoptimum.com",
+            "yaq.es",
+            "edurank.org",
+            "erudera.com",
+            "topuniversities.com",
+            "timeshighereducation.com",
+            "shiksha.com",
+        ]
+
+        for item in exa_results:
+            url = item.get("url", "").lower()
+            if not url:
+                continue
+            if any(bad in url for bad in soft_blocked):
+                continue
+            soft_candidates.append(item)
+
+        candidates = soft_candidates[: max(requested_count * 2, requested_count)]
+
+    extracted_results = []
+    
+
+    if research_type == "education":
+        extraction_prompt = """
+Extract the following fields from this page in a clear structured way:
+- institution_name
+- program_name
+- degree_level
+- country
+- city
+- language_of_instruction
+- admission_requirements
+- english_requirement
+- requires_ielts_or_toefl (true/false/unknown)
+- tuition
+- deadline
+- application_url
+- official_program_url
+- summary
+
+Return the result as structured data.
+"""
+    elif research_type == "travel":
+        extraction_prompt = """
+Extract the following fields from this page in a clear structured way:
+- place_name
+- country
+- city
+- type
+- price
+- booking_link
+- visa_info
+- important_requirements
+- summary
+
+Return the result as structured data.
+"""
+    elif research_type == "product":
+        extraction_prompt = """
+Extract the following fields from this page in a clear structured way:
+- product_name
+- brand
+- price
+- currency
+- availability
+- key_features
+- pros
+- cons
+- official_url
+- summary
+
+Return the result as structured data.
+"""
+    elif research_type == "news":
+        extraction_prompt = """
+Extract the following fields from this page in a clear structured way:
+- headline
+- publisher
+- published_date
+- key_points
+- summary
+- source_url
+
+Return the result as structured data.
+"""
+    else:
+        extraction_prompt = """
+Extract the following fields from this page in a clear structured way:
+- title
+- main_entity
+- important_requirements
+- price_or_cost
+- relevant_dates
+- official_link
+- summary
+
+Return the result as structured data.
+"""
+
+    for item in candidates[: max(requested_count * 2, requested_count)]:
+        url = item.get("url", "")
+        page_content = get_exa_page_content(url)
+        page_data = extract_structured_page_data(page_content, research_type=research_type)
+
+        if research_type == "education":
+            page_data = normalize_education_page_data(page_data, source_url=url)
+
+        print(f"[Research] Parsed structured data keys for {url}: {list(page_data.keys()) if isinstance(page_data, dict) else 'N/A'}")
+
+        extracted_results.append({
+            "source_title": item.get("title", ""),
+            "source_url": url,
+            "exa_snippet": item.get("text", ""),
+            "page_content": page_content,
+            "page_data": page_data
+        })
+
+    deduped_results = deduplicate_research_results(extracted_results)
+
+    print(f"[Research] ✅ Finished research with {len(extracted_results)} extracted results")
+    print(f"[Research] ✅ After deduplication: {len(deduped_results)} unique results")
+
+    return deduped_results
+
+
+
+# هاي الدالة بتعرف إذا المستخدم عم يبني على نتائج البحث السابقة بدل ما يبدأ بحث جديد من الصفر.
+def is_research_followup_request(message: str) -> bool:
+    text = str(message or "").strip().lower()
+
+    triggers = [
+        "من هدول", "من بينهم", "من النتائج", "فيهم", "منهم",
+        "which of these", "from these", "among them", "among these"
+    ]
+
+    return any(t in text for t in triggers)
+
+
+# بتشيك إذا الرسالة فيها طلب بحث أو مقارنة جامعات أو منح
+def is_research_request(message: str) -> bool:
+    text = (message or "").strip().lower()
+
+    triggers = [
+        "ابحث", "ابحثي", "دوري", "دورلي", "research", "find",
+        "جامعة", "جامعات", "ماجستير", "masters", "robotics",
+        "قارن", "قارنة", "منحة", "قبول", "admission", "ielts", "toefl"
+    ]
+
+    return any(t in text for t in triggers)
+
+
+# بيلخص نتائج البحث الجامعي بشكل بسيط للمستخدم
+
+def summarize_research_results(results: List[Dict[str, Any]], requested_count: int = 5) -> str:
+    def localize_display_value(value: Any, field_type: str = "") -> str:
+        if isinstance(value, dict):
+            if field_type == "deadline":
+                parts = []
+                for k, v in value.items():
+                    key = str(k).replace("_", " ").strip()
+                    val = str(v).strip()
+                    if val:
+                        parts.append(f"{key}: {val}")
+                return " | ".join(parts) if parts else "غير مذكور بوضوح"
+            value = str(value)
+
+        if isinstance(value, list):
+            value = " | ".join(str(x).strip() for x in value if str(x).strip())
+
+        value = str(value or "").strip()
+        lowered = value.lower()
+        # إذا القيمة جاية كنص على شكل dict مثل "{'phase_0': '...'}"
+        if field_type == "deadline" and value.startswith("{") and value.endswith("}"):
+            try:
+                parsed = json.loads(value.replace("'", '"'))
+                if isinstance(parsed, dict):
+                    parts = []
+                    for k, v in parsed.items():
+                        key = str(k).replace("_", " ").strip()
+                        val = str(v).strip()
+                        if val:
+                            parts.append(f"{key}: {val}")
+                    return " | ".join(parts) if parts else "غير مذكور بوضوح"
+            except Exception:
+                pass
+
+        unknown_values = {
+            "unknown",
+            "not specified",
+            "not specified.",
+            "not specified in the provided text",
+            "not specified in the provided text.",
+            "n/a",
+            "none",
+            "no especificado",
+            "no especificado en la página",
+            "no especificado en la página.",
+            "no especificado en la pagina",
+            "no especificado en la pagina.",
+            "desconocido"
+        }
+
+        if lowered in unknown_values:
+            if field_type == "tuition":
+                return "غير مذكورة بوضوح"
+            if field_type == "deadline":
+                return "غير مذكور بوضوح"
+            return "غير واضح"
+
+        if lowered in {"yes", "true", "required"}:
+            return "نعم"
+
+        if lowered in {"no", "false", "not required"}:
+            return "لا"
+
+        return value
+
+    if not results:
+        return "[think] ما لقيت نتائج واضحة من البحث حالياً."
+
+    lines = ["[think] رتبت لك النتائج بشكل أوضح، وحاولت أعتمد على المصادر الرسمية قدر الإمكان:\n"]
+
+    for i, item in enumerate(results[:requested_count], 1):
+        page_data = item.get("page_data", {}) or {}
+
+        title = (
+            page_data.get("program_name")
+            or page_data.get("product_name")
+            or page_data.get("place_name")
+            or page_data.get("headline")
+            or page_data.get("title")
+            or item.get("source_title")
+            or "بدون عنوان"
+        )
+
+        institution = page_data.get("institution_name") or ""
+        summary = page_data.get("summary") or ""
+        url = item.get("source_url") or ""
+
+        degree_level = page_data.get("degree_level") or ""
+        country = page_data.get("country") or ""
+        city = page_data.get("city") or ""
+        language_of_instruction = page_data.get("language_of_instruction") or ""
+        requires_ielts_or_toefl = page_data.get("requires_ielts_or_toefl") or ""
+        tuition = page_data.get("tuition") or ""
+        deadline = page_data.get("deadline") or ""
+        application_url = page_data.get("application_url") or ""
+        official_program_url = page_data.get("official_program_url") or ""
+
+        title = str(title).strip()
+        institution = str(institution).strip()
+        summary = str(summary).strip()
+        url = str(url).strip()
+        degree_level = str(degree_level).strip()
+        country = str(country).strip()
+        city = str(city).strip()
+        language_of_instruction = localize_display_value(language_of_instruction, "language")
+        requires_ielts_or_toefl = localize_display_value(requires_ielts_or_toefl, "ielts")
+        tuition = localize_display_value(tuition, "tuition")
+        deadline = localize_display_value(deadline, "deadline")
+        application_url = localize_display_value(application_url, "url")
+        official_program_url = localize_display_value(official_program_url, "url")
+
+        lines.append(f"{i}. {title}")
+
+        if institution:
+            lines.append(f"الجامعة: {institution}")
+
+        meta_parts = []
+        if degree_level:
+            meta_parts.append(f"الدرجة: {degree_level}")
+        if country:
+            meta_parts.append(f"الدولة: {country}")
+        if city:
+            meta_parts.append(f"المدينة: {city}")
+
+        if meta_parts:
+            lines.append(" | ".join(meta_parts))
+
+        if summary:
+            lines.append(f"الملخص: {summary}")
+            
+        important_points = []
+
+        important_points.append(
+            f"لغة الدراسة: {localize_display_value(language_of_instruction, 'language') if language_of_instruction else 'غير واضحة'}"
+        )
+        important_points.append(
+            f"IELTS/TOEFL: {localize_display_value(requires_ielts_or_toefl, 'ielts') if requires_ielts_or_toefl else 'غير واضح'}"
+        )
+        important_points.append(
+            f"الرسوم: {localize_display_value(tuition, 'tuition') if tuition else 'غير مذكورة بوضوح'}"
+        )
+        important_points.append(
+            f"الموعد النهائي: {localize_display_value(deadline, 'deadline') if deadline else 'غير مذكور بوضوح'}"
+        )
+
+        if important_points:
+            lines.append("نقاط مهمة:")
+            for point in important_points:
+                lines.append(f"- {point}")
+
+        if official_program_url:
+            lines.append(f"رابط البرنامج: {official_program_url}")
+        if application_url:
+            lines.append(f"رابط التقديم: {application_url}")
+        elif not official_program_url and url:
+            lines.append(f"الرابط: {url}")
+
+        lines.append("")
+
+    return "\n".join(lines)  
+
+
+
+# بتحدث مزاج وحالة ساندي حسب الرسالة، أول شي بتجرب AI، وإذا فشل بتستخدم قواعد بسيطة
+
 def update_sandy_state(memory: Dict[str, Any], user_message: str) -> None:
-    """
-    Update Sandy mood/state using AI-first context understanding.
-    Falls back to simple rule-based logic if AI fails.
-    """
+    # بتحدث مزاج وحالة ساندي حسب الرسالة، أول شي بتجرب AI، وإذا فشل بتستخدم قواعد بسيطة
     now = datetime.now()
     state = memory.get("sandy_state", {})
 
@@ -293,25 +1505,32 @@ def update_sandy_state(memory: Dict[str, Any], user_message: str) -> None:
     memory["sandy_state"] = state
 
 
+# بتولد رد ساندي حسب المزاج والحالة، بس حالياً بترجع الرد الافتراضي
+
 def get_sandy_reply(user_message: str, memory: Dict[str, Any], default_reply: str) -> str:
-    """توليد رد ساندي بناءً على المزاج والحالة."""
+    # بتولد رد ساندي حسب المزاج والحالة، بس حالياً بترجع الرد الافتراضي
     return default_reply
 
 
 import emoji
 
 
+# بتطلع الرياكشن (زي [happy]) من أول الرد وبتشيله من النص
+
 def extract_reaction_and_clean_text(text: str):
     """
     استخراج الرياكشن (مثل [happy]) من بداية الرد، وحفظه في متغير منفصل.
+    هذا المتغير مهم لتمريره للهاردوير (الشاشة) مستقبلاً.
     يرجع (reaction, text_without_reaction)
     """
     reaction = None
-    cleaned = text.strip()
+    cleaned = str(text or "").strip()
+
     match = re.match(r"^\[([a-zA-Z_]+)\]\s*", cleaned)
     if match:
         reaction = match.group(1)
         cleaned = cleaned[match.end():].strip()
+
     return reaction, cleaned
 
 
@@ -362,6 +1581,11 @@ AZURE_OPENAI_VISION_DEPLOYMENT = os.getenv("AZURE_OPENAI_VISION_DEPLOYMENT", "")
 AZURE_OPENAI_STT_DEPLOYMENT = os.getenv("AZURE_OPENAI_STT_DEPLOYMENT", "").strip()
 AZURE_OPENAI_IMAGE_DEPLOYMENT = os.getenv("AZURE_OPENAI_IMAGE_DEPLOYMENT", "").strip()
 
+# EXA Configuration
+EXA_API_KEY = os.getenv("EXA_API_KEY", "").strip()
+WEB_RESEARCH_PROVIDER = os.getenv("WEB_RESEARCH_PROVIDER", "exa").strip()
+WEB_RESEARCH_MAX_CANDIDATES = int(os.getenv("WEB_RESEARCH_MAX_CANDIDATES", "30").strip())
+
 # Azure Speech Configuration
 AZURE_SPEECH_KEY = os.getenv("AZURE_SPEECH_KEY", "").strip()
 AZURE_SPEECH_REGION = os.getenv("AZURE_SPEECH_REGION", "").strip()
@@ -374,6 +1598,8 @@ SANDY_USER_CHAT_ID = os.getenv("SANDY_USER_CHAT_ID", "").strip()
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI", "").strip()
 MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "sany-db").strip()
+
+
 
 # Initialize MongoDB connection
 mongo_client = None
@@ -557,8 +1783,10 @@ def transcribe_audio_with_azure(audio_bytes: bytes, file_name: str = "voice.ogg"
                 pass
     return None
 
+# بتحول النص لصوت باستخدام Azure TTS وبتعطيك الصوت كـ wav
+
 def synthesize_voice_with_azure(text: str) -> Optional[bytes]:
-    """Synthesize speech with Azure Speech and return WAV bytes."""
+    # بتحول النص لصوت باستخدام Azure TTS وبتعطيك الصوت كـ wav
     if not text:
         return None
     if not AZURE_SPEECH_AVAILABLE or not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
@@ -598,6 +1826,8 @@ def synthesize_voice_with_azure(text: str) -> Optional[bytes]:
                 pass
     return None
 
+# بتحلل صورة باستخدام Azure/OpenAI وبتعطيك وصف مختصر بالعربي
+
 def analyze_image_with_azure(image_bytes: bytes, prompt: str) -> str:
     """Analyze image bytes using Azure/OpenAI multimodal chat."""
     if not image_bytes:
@@ -631,6 +1861,8 @@ def analyze_image_with_azure(image_bytes: bytes, prompt: str) -> str:
     except Exception as e:
         print(f"[Azure Vision] ❌ Analysis failed: {e}")
         return "[think] صار خلل أثناء تحليل الصورة. جرب مرة ثانية."
+
+# بتولد صورة جديدة باستخدام Azure OpenAI حسب الوصف اللي تعطيه
 
 def generate_image_with_azure(prompt: str, size: str = "1024x1024") -> Optional[bytes]:
     """Generate image with Azure OpenAI and return image bytes."""
@@ -670,6 +1902,8 @@ def generate_image_with_azure(prompt: str, size: str = "1024x1024") -> Optional[
 
     return None
 
+# بتشيك إذا المستخدم طلب رسم أو توليد صورة
+
 def is_image_generation_request(message: str) -> bool:
     """Detect if user asks for image generation."""
     text = (message or "").strip().lower()
@@ -677,6 +1911,8 @@ def is_image_generation_request(message: str) -> bool:
         "ارسم", "رسمة", "صمم صورة", "ولّد صورة", "generate image", "draw"
     ]
     return any(t in text for t in triggers)
+
+# بتطلع وصف الصورة من رسالة المستخدم بعد ما يشيل الأمر أو الكلمات المفتاحية
 
 def extract_image_prompt(message: str) -> str:
     """Extract prompt text for image generation."""
@@ -687,9 +1923,91 @@ def extract_image_prompt(message: str) -> str:
     return text
 
 
-def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Optional[int] = None):
-    """Send text reply and optional Azure-generated voice reply."""
+# هاي الدالة بتحول الأرقام المكتوبة لنسخة منطوقة حسب لغة النص، لكن فقط للصوت، أما الكتابة الأصلية بتضل زي ما هي.
+def localize_numbers_for_tts(text: str) -> str:
+    text = str(text or "").strip()
 
+    def looks_arabic(s: str) -> bool:
+        return bool(re.search(r'[\u0600-\u06FF]', s))
+
+    arabic_numbers = {
+        "1": "واحد",
+        "2": "اثنين",
+        "3": "ثلاثة",
+        "4": "أربعة",
+        "5": "خمسة",
+        "6": "ستة",
+        "7": "سبعة",
+        "8": "ثمانية",
+        "9": "تسعة",
+        "10": "عشرة",
+    }
+
+    english_numbers = {
+        "1": "one",
+        "2": "two",
+        "3": "three",
+        "4": "four",
+        "5": "five",
+        "6": "six",
+        "7": "seven",
+        "8": "eight",
+        "9": "nine",
+        "10": "ten",
+    }
+
+    number_map = arabic_numbers if looks_arabic(text) else english_numbers
+
+    for num, spoken in sorted(number_map.items(), key=lambda x: len(x[0]), reverse=True):
+        text = re.sub(
+            rf'(?<![A-Za-z\u0600-\u06FF0-9]){re.escape(num)}(?![A-Za-z\u0600-\u06FF0-9])',
+            spoken,
+            text
+        )
+
+    return text
+
+
+# هاي الدالة بتجهز النص قبل ما ينقرأ صوتياً: بتحذف الروابط، بتخفف القوائم الطويلة، وبدل ما يقرأ اللينكات بتحكي للمستخدم إنو الروابط مرفقة بالرسالة.
+def prepare_tts_text(text: str) -> str:
+    """
+    Clean text before sending it to TTS:
+    - remove URLs
+    - shorten long lists
+    - add a friendly note instead of reading raw links
+    """
+    if not text:
+        return ""
+
+    cleaned = text
+
+    # Remove URLs
+    cleaned = re.sub(r'https?://\S+', '', cleaned)
+
+    # Remove excessive blank lines
+    cleaned = re.sub(r'\n\s*\n+', '\n\n', cleaned)
+
+    # If original text had links, mention that links are attached in the message
+    if re.search(r'https?://\S+', text):
+        cleaned = cleaned.strip()
+        if cleaned:
+            cleaned += "\n\nالروابط مرفقة في الرسالة."
+        else:
+            cleaned = "تم تجهيز النتيجة، الروابط مرفقة في الرسالة."
+
+    # Optional: shorten very long result lists
+    lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+    if len(lines) > 8:
+        cleaned = "\n".join(lines[:8]) + "\n\nباقي التفاصيل والروابط موجودة في الرسالة."
+
+    cleaned = localize_numbers_for_tts(cleaned)
+    return cleaned.strip()
+
+
+# بتبعت رسالة نصية للمستخدم، ولو فيه صوت بتبعت كمان رد صوتي
+def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Optional[int] = None):
+    # بتبعت رسالة نصية للمستخدم، ولو فيه صوت بتبعت كمان رد صوتي
+    text = str(text or "[think] صار خلل وما رجع نص واضح.")
     # استخرج الرياكشن من الرد (إذا موجود)
     reaction, text_without_reaction = extract_reaction_and_clean_text(text)
     # حفظ الرياكشن في متغير عالمي (للهاردوير لاحقاً)
@@ -699,15 +2017,16 @@ def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Opti
 
     telegram_bot.send_message(chat_id, text_without_reaction, reply_to_message_id=reply_to_message_id, parse_mode=None)
 
-    # إزالة الإيموجي من النص الصوتي حتى لا تُقرأ كنص
+    # إزالة الإيموجي من النص الصوتي حتى لا تُقرأ كنص والروابط ايضا
     def remove_emojis(s):
         try:
             import emoji
             return emoji.replace_emoji(s, replace="")
         except ImportError:
             return s
+    tts_text = prepare_tts_text(text_without_reaction)
+    tts_text = remove_emojis(tts_text)
 
-    tts_text = remove_emojis(text_without_reaction)
     print(f"[DEBUG] Trying Google TTS for: {tts_text}")
 
     current_state = agent.memory.get("sandy_state", {})
@@ -748,6 +2067,8 @@ def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Opti
 # MEMORY MANAGEMENT (MongoDB + JSON Fallback)
 # ═══════════════════════════════════════════════════════════
 
+# بتقرأ ملف JSON بأمان وبترجع الديفولت لو صار خطأ
+
 def _read_json_file(path: Path, default: Any) -> Any:
     """Read JSON file safely and return default on any failure."""
     if not path.exists():
@@ -758,6 +2079,8 @@ def _read_json_file(path: Path, default: Any) -> Any:
     except Exception as e:
         print(f"[JSON] Error reading {path.name}: {e}")
         return default
+
+# بترجع ذاكرة ساندي (من MongoDB أو من ملف)
 
 def load_memory() -> Dict[str, Any]:
     """Load persistent memory from MongoDB or disk"""
@@ -811,6 +2134,8 @@ def load_memory() -> Dict[str, Any]:
     # Return default structure
     return default_memory
 
+# بتخزن ذاكرة ساندي (في MongoDB أو ملف)
+
 def save_memory(memory: Dict[str, Any]):
     """Save memory to MongoDB or disk"""
     
@@ -835,6 +2160,8 @@ def save_memory(memory: Dict[str, Any]):
             print("[Memory] 📄 Saved to JSON file")
     except Exception as e:
         print(f"[Memory] Error saving memory: {e}")
+
+# بترجع جلسة المحادثة الحالية (من MongoDB أو ملف)
 
 def load_session() -> Dict[str, Any]:
     """Load current session memory from MongoDB or disk"""
@@ -872,6 +2199,8 @@ def load_session() -> Dict[str, Any]:
     
     return default_session
 
+# بتخزن جلسة المحادثة الحالية (في MongoDB أو ملف)
+
 def save_session(session: Dict[str, Any]):
     """Save session memory to MongoDB or disk"""
     
@@ -900,6 +2229,8 @@ def save_session(session: Dict[str, Any]):
 # ═══════════════════════════════════════════════════════════
 # SMART LEARNING FUNCTIONS
 # ═══════════════════════════════════════════════════════════
+
+# بتحدد مستوى معرفة ساندي عن نبيل (مبتدئ، فضولي...)
 
 def get_learning_saturation(memory: Dict[str, Any]) -> Dict[str, Any]:
     """حسب مستوى معرفة Sandy عن نبيل"""
@@ -931,6 +2262,8 @@ def get_learning_saturation(memory: Dict[str, Any]) -> Dict[str, Any]:
         "should_ask": level in ["BEGINNER", "CURIOUS", "LEARNING"]
     }
 
+# بتقرر إذا ساندي لازم تسأل سؤال جديد حسب مستوى المعرفة
+
 def should_ask_question_smart(memory: Dict[str, Any], fact_type: str) -> bool:
     """
     هل Sandy بتسأل سؤال؟
@@ -949,6 +2282,8 @@ def should_ask_question_smart(memory: Dict[str, Any], fact_type: str) -> bool:
     }
     
     return rules.get(level, False)
+
+# بتستخرج حقائق جديدة من رسالة المستخدم لو فيها معلومة مهمة
 
 def extract_facts_from_message(message: str, memory: Dict[str, Any]) -> List[str]:
     """استخرج حقائق جديدة من رسالة المستخدم"""
@@ -973,6 +2308,8 @@ def extract_facts_from_message(message: str, memory: Dict[str, Any]) -> List[str
             })
     
     return facts
+
+# بتولد سؤال ذكي للمستخدم حسب الرسالة ومستوى المعرفة
 
 def generate_learning_questions(user_message: str, memory: Dict[str, Any]) -> Optional[str]:
     """توليد أسئلة ذكية بناءً على الرسالة والمستوى"""
@@ -1009,6 +2346,8 @@ def generate_learning_questions(user_message: str, memory: Dict[str, Any]) -> Op
 # TASKS & REMINDERS MANAGEMENT
 # ═══════════════════════════════════════════════════════════
 
+# بترجع كل المهام (من MongoDB أو ملف)
+
 def load_tasks() -> List[Dict[str, Any]]:
     """Load tasks from MongoDB or disk"""
     
@@ -1044,6 +2383,8 @@ def load_tasks() -> List[Dict[str, Any]]:
         return tasks_json
     return []
 
+# بتخزن كل المهام (في MongoDB أو ملف)
+
 def save_tasks(tasks: List[Dict[str, Any]]):
     """Save tasks to MongoDB or disk"""
     
@@ -1067,6 +2408,8 @@ def save_tasks(tasks: List[Dict[str, Any]]):
             print("[Tasks] 📄 Saved to JSON file")
     except Exception as e:
         print(f"[Tasks] Error saving tasks: {e}")
+
+# بترجع كل التذكيرات (من MongoDB أو ملف)
 
 def load_reminders() -> List[Dict[str, Any]]:
     """Load reminders from MongoDB or disk"""
@@ -1103,6 +2446,8 @@ def load_reminders() -> List[Dict[str, Any]]:
         return reminders_json
     return []
 
+# بتخزن كل التذكيرات (في MongoDB أو ملف)
+
 def save_reminders(reminders: List[Dict[str, Any]]):
     """Save reminders to MongoDB or disk"""
     
@@ -1127,6 +2472,8 @@ def save_reminders(reminders: List[Dict[str, Any]]):
     except Exception as e:
         print(f"[Reminders] Error saving reminders: {e}")
 
+# بتضيف مهمة جديدة وترجع رقمها
+
 def add_task(task_text: str) -> str:
     """Add a new task"""
     tasks = load_tasks()
@@ -1142,6 +2489,8 @@ def add_task(task_text: str) -> str:
     print(f"[Tasks] ✅ مهمة جديدة: {task_text}")
     return task["id"]
 
+# بتعلم على المهمة إنها اكتملت
+
 def complete_task(task_id: str) -> bool:
     """Mark task as complete"""
     tasks = load_tasks()
@@ -1153,6 +2502,8 @@ def complete_task(task_id: str) -> bool:
             print(f"[Tasks] ✅ تم إكمال: {task['text']}")
             return True
     return False
+
+# بترجع قائمة بكل المهام المعلقة
 
 def list_tasks() -> str:
     """Get list of all tasks"""
@@ -1166,6 +2517,8 @@ def list_tasks() -> str:
     for i, task in enumerate(active_tasks, 1):
         task_list += f"{i}. {task['text']}\n"
     return task_list
+
+# بتضيف تذكير جديد (وتحاول تحلل الوقت تلقائياً لو مش محدد)
 
 def add_reminder(text: str, remind_at: str = None) -> str:
     """Add a new reminder with automatic time parsing"""
@@ -1190,6 +2543,8 @@ def add_reminder(text: str, remind_at: str = None) -> str:
         print(f"[Reminders] 🔔 تذكير جديد: {text} (بدون وقت محدد)")
     
     return reminder["id"]
+
+# بتشيك إذا فيه تذكيرات لازم تنبعت وبتبعتها تلقائياً
 
 def check_reminders() -> Optional[str]:
     """Check if any reminders need to be sent and send them via Telegram"""
@@ -1252,6 +2607,8 @@ def check_reminders() -> Optional[str]:
 # TIME PARSING FOR REMINDERS
 # ═══════════════════════════════════════════════════════════
 
+# بتحول الأرقام العربية/الفارسية لأرقام انجليزية عشان التحليل
+
 def normalize_arabic_digits(text: str) -> str:
     """Normalize Arabic/Persian digits to ASCII digits for regex parsing."""
     if not text:
@@ -1261,6 +2618,8 @@ def normalize_arabic_digits(text: str) -> str:
         "01234567890123456789"
     )
     return text.translate(translation)
+
+# بتستخدم الذكاء الاصطناعي عشان تكتشف إذا الرسالة فيها نية تذكير وتطلع التفاصيل
 
 def extract_reminder_intent_ai(message: str) -> Optional[Dict[str, Any]]:
     """Use AI to detect reminder intent with structured output.
@@ -1305,6 +2664,8 @@ def extract_reminder_intent_ai(message: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         print(f"[ReminderAI] ⚠️ Intent extraction failed: {e}")
         return None
+
+# بتخلي الذكاء الاصطناعي يخطط تذكير كامل (نص ووقت ورد)
 
 def plan_reminder_with_ai(message: str) -> Optional[Dict[str, Any]]:
     """AI-only reminder planner.
@@ -1371,6 +2732,8 @@ def plan_reminder_with_ai(message: str) -> Optional[Dict[str, Any]]:
         print(f"[ReminderAI] ⚠️ Planner failed: {e}")
         return None
 
+# بتطلع نص التذكير الصافي من رسالة المستخدم
+
 def extract_reminder_text(message: str) -> str:
     """Extract clean reminder payload from user message."""
     text = message or ""
@@ -1384,6 +2747,8 @@ def extract_reminder_text(message: str) -> str:
     text = text.replace('"', ' ').replace("'", ' ')
     text = re.sub(r'\s+', ' ', text).strip(' ؟?،,.')
     return text
+
+# بتحلل الوقت من رسالة التذكير (يدوي)
 
 def parse_reminder_time(message: str) -> Optional[str]:
     """Parse time from reminder message
@@ -1447,6 +2812,8 @@ def parse_reminder_time(message: str) -> Optional[str]:
     
     return None
 
+# بتستخدم الذكاء الاصطناعي لتحليل الوقت من رسالة التذكير
+
 def parse_reminder_time_ai(message: str) -> Optional[str]:
     """Use AI to parse reminder time into ISO timestamp based on current server time."""
     if not message:
@@ -1501,13 +2868,17 @@ def parse_reminder_time_ai(message: str) -> Optional[str]:
 # SANDY AGENT LOGIC
 # ═══════════════════════════════════════════════════════════
 
+# كلاس الوكيل الذكي ساندي: فيه كل المنطق الأساسي للذاكرة، المزاج، الردود، المهام والتذكيرات
+
 class SandyAgent:
     def __init__(self):
         self.memory = load_memory()
         self.session = load_session()
         self.is_speaking = False
         self.last_activity = datetime.now()
-        
+        self.last_research_results = []
+        self.last_research_type = "general"
+
     def build_system_prompt(self) -> str:
         """Build comprehensive system prompt for Sandy, including current mood and its reason."""
         saturation = get_learning_saturation(self.memory)
@@ -1521,12 +2892,9 @@ class SandyAgent:
         }
         mode_text = personality_mode.get(level, "")
 
-        # مزاج ساندي الحالي وسببه
         state = self.memory.get("sandy_state", {})
         mood = state.get("mood", "happy")
-        repeat_count = state.get("repeat_count", 0)
         snapped = state.get("snapped", False)
-        last_time = state.get("last_user_message_time")
         mood_reason = ""
         if snapped:
             mood_reason = "(ملل شديد بسبب تكرار نفس الرسالة كثيرًا)"
@@ -1555,11 +2923,9 @@ class SandyAgent:
 🧠 مزاج ساندي الحالي: {mood} {mood_reason}
 
 تعليمات المزاج:
-- يجب أن يكون ردك واقعيًا ويعكس هذا المزاج بوضوح (مثلاً إذا كنتِ زعلانة عبري عن العتب أو الزعل بشكل طبيعي، إذا ملانة أظهري الضجر، إذا سعيدة كوني لطيفة...)
-- لا تكتفي بجملة قصيرة، بل عبري عن الشعور بشكل إنساني وواقعي، مع أمثلة واقعية (عتب، ملل، غضب، سعادة...)
-- إذا كان المزاج happy، ردي بشكل طبيعي وودود.
-- إذا كان المزاج angry أو sad أو bored أو snapped، عبري عن السبب في الرد (مثلاً: "زعلت لأني ما سمعت صوتك من زمان" أو "زهقت من التكرار...")
-- لا تكتبي نفس الجملة كل مرة، بل نوعي في التعبير حسب السياق.
+- يجب أن يكون ردك واقعيًا ويعكس هذا المزاج بوضوح
+- إذا كان المزاج angry أو sad أو bored أو snapped، عبري عن السبب في الرد
+- لا تكتبي نفس الجملة كل مرة، بل نوعي في التعبير حسب السياق
 
 أدوات متاحة:
 - الإجابة على الأسئلة والحوارات
@@ -1572,21 +2938,6 @@ class SandyAgent:
 - اختصر إلا إذا طلب نبيل التفصيل
 - ابدأ برد بكلمة انجليزية واحدة توضح الحالة الشعورية بين قوسين: [happy], [think], etc.
 - كوني ودية وذكية في نفس الوقت
-
-⭐️ ملاحظة مهمة جداً (أساسي):
-أنتِ تتعلمين من كل محادثة! 🧠
-- كل ما تعرفتِ على نبيل أكتر = قللي الأسئلة
-- في البداية (BEGINNER): اسأليه أسئلة كتير، كوني فضولية جداً!
-- في النهاية (EXPERT): ما تسأليه إلا الضروري، كوني صديقة حقيقية
-
-مثال:
-أسبوع أول:
-- نبيل: "اسمي نبيل محمود"
-- أنتِ: "أهلاً نبيل! 👋 نبيل محمود... اسم جميل! إذاً أنت من وين بالضبط؟ وشنو شغلك؟"
-
-بعد شهر:
-- نبيل: "مشيت على المقهى"
-- أنتِ: "[relax] تمام، المقهى يريحك؟ 😊"
 """
         return prompt
 
@@ -1594,35 +2945,88 @@ class SandyAgent:
         """Get relevant context from memory"""
         saturation = get_learning_saturation(self.memory)
         level = saturation['level']
-        
+
         context = f"📚 السياق والحقائق المحفوظة عن نبيل (المستوى: {level}):\n"
-        
-        # All known facts
+
         facts = self.memory.get('facts', [])
         if facts:
             context += "\n✓ ما تعلمته عن نبيل:\n"
-            for fact in facts[-10:]:  # Last 10 facts
+            for fact in facts[-10:]:
                 context += f"  • {fact.get('text', '')[:80]}\n"
         else:
             context += "\n⚠️ أنا ما تعلمت حاجة عن نبيل بعد! بدي أسأل كتير! 🤔\n"
-        
-        # Recent conversations for context
+
         recent = self.memory.get('conversations', [])[-3:]
         if recent:
             context += "\nآخر محادثات:\n"
             for conv in recent:
                 context += f"🗣️ نبيل: {conv.get('user', '')[:60]}...\n"
-        
+
         return context
 
     def think(self, user_message: str) -> str:
         """Process message through OpenAI and generate response, with mood/memory logic"""
         try:
-            # 1. تحديث حالة المزاج والذاكرة قبل أي رد
             update_sandy_state(self.memory, user_message)
             save_memory(self.memory)
 
-            # AI-only reminder routing (no regex/rule fallback)
+            if is_research_followup_request(user_message) and self.last_research_results:
+                requested_count = extract_requested_result_count(user_message, default=5)
+                preference = detect_research_preference(user_message)
+                print(f"[DEBUG] requested_count={requested_count}")
+                print(f"[DEBUG] preference={preference}")
+
+                research_results = filter_research_results(self.last_research_results, preference)
+                research_results = rank_research_results(research_results, preference)
+                print(f"[DEBUG] results_after_filtering={len(research_results)}")
+
+                if research_results:
+                    self.last_research_results = research_results
+
+                if preference.get("best_only") or preference.get("cheapest_only"):
+                    winner_text = build_winner_summary(research_results, preference)
+                    return str(winner_text or "[think] ما قدرت أحدد أفضل خيار من النتائج السابقة.")
+
+                summary_text = summarize_research_results(
+                    research_results,
+                    requested_count=requested_count
+                )
+                return str(summary_text or "[think] ما قدرت أرتب النتائج السابقة بشكل واضح.")
+
+            if is_research_request(user_message):
+                research_type = detect_research_type(user_message)
+                requested_count = extract_requested_result_count(user_message, default=5)
+                preference = detect_research_preference(user_message)
+
+                research_results = run_research_pipeline(
+                    user_message,
+                    research_type=research_type,
+                    requested_count=max(requested_count * 2, requested_count)
+                )
+
+                research_results = deduplicate_research_results(research_results)
+                research_results = filter_research_results(research_results, preference)
+                research_results = rank_research_results(research_results, preference)
+
+                self.last_research_results = research_results
+                self.last_research_type = research_type
+
+                if (preference.get("best_only") or preference.get("cheapest_only")) and extract_requested_result_count(user_message, default=5) == 1:
+                    requested_count = 1
+
+                if preference.get("best_only") or preference.get("cheapest_only"):
+                    winner_text = build_winner_summary(research_results, preference)
+                    return str(winner_text or "[think] لقيت نتائج، لكن ما قدرت أحدد الفائز بشكل واضح.")
+
+                if preference.get("no_ielts") and not research_results:
+                    return "[think] ما لقيت نتائج مؤكدة من المصادر الحالية تقول بوضوح إن البرنامج لا يطلب IELTS أو TOEFL. إذا بدك، أقدر أوسّع البحث أو أرجع لك البرامج التي شرط اللغة فيها غير واضح."
+
+                summary_text = summarize_research_results(
+                    research_results,
+                    requested_count=requested_count
+                )
+                return str(summary_text or "[think] البحث اشتغل، لكن ما قدرت أرتب النتيجة كنص واضح.")
+
             reminder_plan = plan_reminder_with_ai(user_message)
             if reminder_plan and reminder_plan.get("is_reminder"):
                 reminder_text = reminder_plan.get("reminder_text", "")
@@ -1640,30 +3044,23 @@ class SandyAgent:
                     return get_sandy_reply(user_message, self.memory, assistant_reply)
                 return get_sandy_reply(user_message, self.memory, "[think] فهمت إنك بتحكي عن تذكير، بس بدي تفاصيل أدق شوي حتى أسجله بشكل صحيح.")
 
-            # Build the system prompt
             system_prompt = self.build_system_prompt()
-
-            # Get context from memory
             context = self.get_context(user_message)
 
-            # Add to session history
             self.session['messages'].append({
                 "role": "user",
                 "content": user_message,
                 "timestamp": datetime.now().isoformat()
             })
 
-            # Keep only last 20 messages for context
             if len(self.session['messages']) > 20:
                 self.session['messages'] = self.session['messages'][-20:]
 
-            # Prepare messages for API
             messages = [
                 {"role": m.get("role"), "content": m.get("content")}
                 for m in self.session['messages']
             ]
 
-            # Call OpenAI
             response = create_chat_completion(
                 messages=[
                     {"role": "system", "content": system_prompt + "\n\n" + context},
@@ -1676,24 +3073,20 @@ class SandyAgent:
 
             assistant_message = response.choices[0].message.content
 
-            # Save to session
             self.session['messages'].append({
                 "role": "assistant",
                 "content": assistant_message,
                 "timestamp": datetime.now().isoformat()
             })
 
-            # Save memory
             save_session(self.session)
 
-            # ⭐️ LEARNING MODE - Extract facts from user message
             new_facts = extract_facts_from_message(user_message, self.memory)
             if new_facts:
                 self.memory['facts'].extend(new_facts)
                 saturation = get_learning_saturation(self.memory)
                 print(f"[Learn] حفظت {len(new_facts)} حقيقة جديدة! (Total: {saturation['total_facts']}, Level: {saturation['level']})")
 
-            # ⭐️ Generate smart follow-up question (only if needed)
             learning_question = generate_learning_questions(user_message, self.memory)
             if learning_question:
                 assistant_message += f"\n\n{learning_question}"
@@ -1703,20 +3096,17 @@ class SandyAgent:
                 saturation = get_learning_saturation(self.memory)
                 print(f"[Learn] بدون أسئلة (Level: {saturation['level']}) - صرنا صديقات! 💫")
 
-            # Store in long-term memory
             self.memory['conversations'].append({
                 "user": user_message,
                 "assistant": assistant_message,
                 "timestamp": datetime.now().isoformat()
             })
 
-            # Keep only last 100 conversations
             if len(self.memory['conversations']) > 100:
                 self.memory['conversations'] = self.memory['conversations'][-100:]
 
             save_memory(self.memory)
 
-            # 2. تخصيص الرد النهائي حسب المزاج
             return get_sandy_reply(user_message, self.memory, assistant_message)
 
         except Exception as e:
@@ -1738,25 +3128,23 @@ class SandyAgent:
         }
         self.memory['reminders'].append(reminder)
         save_memory(self.memory)
-    
-    # ⭐️ NEW: Task and Reminder Methods
-    
+
     def create_task(self, task_text: str) -> str:
         """Create a new task"""
         return add_task(task_text)
-    
+
     def finish_task(self, task_id: str) -> bool:
         """Mark task as done"""
         return complete_task(task_id)
-    
+
     def show_tasks(self) -> str:
         """Show all pending tasks"""
         return list_tasks()
-    
+
     def create_reminder(self, text: str, remind_at: str = None) -> str:
         """Create a new reminder"""
         return add_reminder(text, remind_at)
-    
+
     def show_pending_reminders(self) -> Optional[str]:
         """Check and show pending reminders"""
         return check_reminders()
@@ -1771,6 +3159,8 @@ agent = SandyAgent()
 _recent_message_keys = deque(maxlen=500)
 _recent_message_set = set()
 _recent_message_lock = threading.Lock()
+
+# بتشيك إذا رسالة تيليجرام وصلت قبل هيك عشان ما تتكرر المعالجة
 
 def _is_duplicate_telegram_message(message) -> bool:
     """Return True if this Telegram message has already been processed recently."""
@@ -1788,12 +3178,15 @@ def _is_duplicate_telegram_message(message) -> bool:
 
     return False
 
+# بتتأكد إذا المستخدم المرسل هو نبيل أو شخص مصرح له
+
 def _is_authorized_user(message) -> bool:
     return str(message.from_user.id) == SANDY_USER_CHAT_ID
 
+# هاندلر أمر /start و /help: بيعرف ساندي عن نفسها
 @telegram_bot.message_handler(commands=['start', 'help'])
 def handle_start(message):
-    """Handle start command"""
+    # أول ما المستخدم يكتب /start، ساندي بتعرف عن نفسها وبتشرح شو بتقدر تعمل
     response = """[love] أهلاً يا نبيل! 💫
 أنا ساندي، وكيلك الذكي الجديد!
 الآن بأشتغل 24/7 بدون ما تحتاج تشغّل اللابتوب.
@@ -1809,9 +3202,10 @@ def handle_start(message):
 """
     telegram_bot.reply_to(message, response)
 
+# هاندلر أمر /image أو /img: بيولد صورة ويرجعها
 @telegram_bot.message_handler(commands=['image', 'img'])
 def handle_image_command(message):
-    """Generate image from /image command."""
+    # لما المستخدم يطلب صورة بـ /image، هون ساندي بتولد صورة وترجعها
     try:
         if _is_duplicate_telegram_message(message):
             return
@@ -1845,9 +3239,10 @@ def handle_image_command(message):
         print(f"[Error] Image command handler: {e}")
         telegram_bot.reply_to(message, "[think] صار خلل أثناء توليد الصورة.")
 
+# هاندلر استقبال صورة: بيحللها باستخدام Azure AI
 @telegram_bot.message_handler(content_types=['photo'])
 def handle_photo(message):
-    """Analyze incoming photo with Azure AI vision."""
+    # لو المستخدم بعت صورة، ساندي بتحللها باستخدام Azure AI
     try:
         if _is_duplicate_telegram_message(message):
             return
@@ -1876,6 +3271,7 @@ def handle_photo(message):
         print(f"[Error] Photo handler: {e}")
         telegram_bot.reply_to(message, "[think] صار خلل أثناء تحليل الصورة.")
 
+# هاندلر استقبال فيديو: بيحلل صورة المعاينة (thumbnail) للفيديو
 @telegram_bot.message_handler(content_types=['video'])
 def handle_video(message):
     """Analyze video via preview thumbnail to avoid heavy processing errors."""
@@ -1913,6 +3309,7 @@ def handle_video(message):
         print(f"[Error] Video handler: {e}")
         telegram_bot.reply_to(message, "[think] صار خلل أثناء تحليل الفيديو.")
 
+# هاندلر استقبال صوت أو ملف صوتي: بيحول الصوت لنص ويرد عليه
 @telegram_bot.message_handler(content_types=['voice', 'audio'])
 def handle_voice_or_audio(message):
     """Transcribe audio with Azure, then respond with text + voice."""
@@ -1949,6 +3346,7 @@ def handle_voice_or_audio(message):
         print(f"[Error] Voice handler: {e}")
         telegram_bot.reply_to(message, "[think] صار خلل أثناء تحليل الصوت.")
 
+# هاندلر استقبال أي رسالة نصية: المنطق الرئيسي للردود
 @telegram_bot.message_handler(content_types=['text'])
 def handle_message(message):
     """Handle all messages"""
@@ -2006,12 +3404,17 @@ def handle_message(message):
         send_text_and_voice_reply(chat_id, response, reply_to_message_id=message.message_id)
         
     except Exception as e:
+        import traceback
         print(f"[Error] Telegram handler: {e}")
+        traceback.print_exc()
         telegram_bot.reply_to(message, f"[اعتذر] حدث خطأ: {str(e)}")
+
 
 # ═══════════════════════════════════════════════════════════
 # SCHEDULED TASKS
 # ═══════════════════════════════════════════════════════════
+
+# كل يوم الصبح (9 صباحاً) ساندي بتبعت ملخص يومي تلقائي
 
 def daily_briefing():
     """Send daily briefing at 9 AM"""
@@ -2028,12 +3431,16 @@ scheduler.add_job(check_reminders, 'interval', minutes=1)
 # ═══════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════
+# بتجهز البوت لوضع polling المحلي (بتشيل أي webhook)
+
 def prepare_telegram_polling():
     try:
         telegram_bot.remove_webhook()
         print("[Telegram] Webhook removed for local polling mode.")
     except Exception as e:
         print(f"[Telegram] Failed to remove webhook: {e}")
+
+# نقطة التشغيل الرئيسية للوكيل ساندي
 
 def main():
     """Main entry point"""
