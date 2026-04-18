@@ -1,4 +1,5 @@
 from typing import Any, Callable, Dict, List, Optional
+from xmlrpc import client
 
 
 def _chat_client_and_model(
@@ -51,6 +52,7 @@ def create_chat_completion(
     if response_format is not None:
         kwargs["response_format"] = response_format
 
+    print(f"[Chat Route] provider={'azure' if client is azure_openai_client and azure_openai_client is not None else 'openai'} model={model_name}")
     return client.chat.completions.create(**kwargs)
 
 

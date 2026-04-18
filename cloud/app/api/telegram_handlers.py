@@ -256,8 +256,9 @@ def register_basic_telegram_handlers(
             audio_bytes, file_path = downloaded
             transcript = transcribe_audio_with_azure_fn(
                 audio_bytes,
-                azure_openai_client=azure_openai_client,
-                azure_openai_stt_deployment=azure_openai_stt_deployment,
+                azure_speech_available=azure_speech_available,
+                azure_speech_key=azure_speech_key,
+                azure_speech_region=azure_speech_region,
                 file_name=file_path,
             )
             if not transcript:

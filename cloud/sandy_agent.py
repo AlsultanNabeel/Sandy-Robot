@@ -5,25 +5,13 @@ Inspired by OpenClaw, powered by OpenAI GPT-4o
 """
 
 import os
-import json
-from pydoc import text
-import time
-import asyncio
-import threading
-import re
-import io
-import base64
-import tempfile
-import requests
-from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Optional
 from dotenv import load_dotenv
 from openai import OpenAI, AzureOpenAI
 import telebot
 from apscheduler.schedulers.background import BackgroundScheduler
-import certifi
 from app.features.research import (
     detect_research_type,
     extract_requested_result_count,
@@ -35,37 +23,18 @@ from app.features.research import (
     build_winner_summary,
     filter_research_results,
     rank_research_results,
-    is_official_source_url,
-    extract_structured_page_data,
-    normalize_education_page_data,
     run_research_pipeline,
-)
-from app.features.tasks import (
-    add_task,
-    complete_task,
-    list_tasks,
 )
 from app.features.reminders import (
     add_reminder,
     check_reminders,
     plan_reminder_with_ai,
 )
-from cloud.app.utils import text
-
 from app.agent.memory import (
     load_memory,
     save_memory,
     load_session,
     save_session,
-)
-from cloud.app.agent.learning import (
-    get_learning_saturation,
-    extract_facts_from_message,
-    generate_learning_questions,
-)
-from cloud.app.agent.mood import (
-    update_sandy_state,
-    get_sandy_reply,
 )
 from app.agent.learning import (
     get_learning_saturation,
@@ -92,16 +61,13 @@ from app.features.vision import (
     generate_image_with_azure,
 )
 from app.features.voice import send_text_and_voice_reply
-from app.api.telegram_handlers import (
-    _is_duplicate_telegram_message,
-    _is_authorized_user,
-    register_basic_telegram_handlers,
-)
+from app.api.telegram_handlers import register_basic_telegram_handlers
 from app.api.telegram_runtime import (
-    prepare_telegram_polling,
-    set_telegram_webhook,
+    run_sandy_runtime,
+    configure_sandy_scheduler,
+    build_telegram_webhook_runtime,
 )
-from app.api.webhook import create_telegram_webhook_app
+
 
 # Try to import Chroma for smart memory
 try:
@@ -216,8 +182,6 @@ mongo_client, mongo_db = init_mongo_connection(
     MONGODB_DB_NAME,
 )
 
-
-
 # DEBUG: Print what we're reading
 print("[DEBUG STARTUP] Environment Variables:")
 print(f"  OPENAI_API_KEY: {'SET' if OPENAI_API_KEY else 'EMPTY'} (len={len(OPENAI_API_KEY)})")
@@ -281,6 +245,10 @@ create_chat_completion = make_chat_completion_fn(
 telegram_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=True)
 scheduler = BackgroundScheduler(timezone=None)
 scheduler.start()
+
+telegram_webhook_runtime = build_telegram_webhook_runtime(
+    telegram_bot=telegram_bot,
+)
 
 LAST_ASSISTANT_REACTION = None
 
@@ -558,28 +526,6 @@ class SandyAgent:
             self.memory['facts'].append(fact)
             save_memory(self.memory, memory_file=MEMORY_FILE, mongo_db=mongo_db)
 
-
-def create_task(self, task_text: str) -> str:
-    """Create a new task"""
-    return add_task(task_text, mongo_db=mongo_db, tasks_file=TASKS_FILE)
-
-def finish_task(self, task_id: str) -> bool:
-    """Mark task as done"""
-    return complete_task(task_id, mongo_db=mongo_db, tasks_file=TASKS_FILE)
-
-def show_tasks(self) -> str:
-    """Show all pending tasks"""
-    return list_tasks(mongo_db=mongo_db, tasks_file=TASKS_FILE)
-
-def create_reminder(self, text: str, remind_at: str = None) -> str:
-    """Create a new reminder"""
-    add_reminder(text, remind_at, mongo_db=mongo_db, reminders_file=REMINDERS_FILE)
-    return f"[happy] تمام ✅ سجلت التذكير: {text}"
-
-def show_pending_reminders(self) -> Optional[str]:
-    """Check and show pending reminders"""
-    return check_reminders(mongo_db=mongo_db, reminders_file=REMINDERS_FILE)
-
 # ═══════════════════════════════════════════════════════════
 # TELEGRAM BOT HANDLERS
 # ═══════════════════════════════════════════════════════════
@@ -614,60 +560,16 @@ register_basic_telegram_handlers(
     is_image_generation_request_fn=is_image_generation_request,
     )
 
-# Guard against duplicated Telegram deliveries/restarts.
-_recent_message_keys = deque(maxlen=500)
-_recent_message_set = set()
-_recent_message_lock = threading.Lock()
-
-# بتشيك إذا رسالة تيليجرام وصلت قبل هيك عشان ما تتكرر المعالجة
-
-def _is_duplicate_telegram_message(message) -> bool:
-    """Return True if this Telegram message has already been processed recently."""
-    key = f"{message.chat.id}:{message.message_id}"
-    with _recent_message_lock:
-        if key in _recent_message_set:
-            return True
-
-        if len(_recent_message_keys) == _recent_message_keys.maxlen:
-            old = _recent_message_keys.popleft()
-            _recent_message_set.discard(old)
-
-        _recent_message_keys.append(key)
-        _recent_message_set.add(key)
-
-    return False
-
-# بتتأكد إذا المستخدم المرسل هو المستخدم أو شخص مصرح له
-
-def _is_authorized_user(message) -> bool:
-    return str(message.from_user.id) == SANDY_USER_CHAT_ID
-
-
-# ═══════════════════════════════════════════════════════════
-# SCHEDULED TASKS
-# ═══════════════════════════════════════════════════════════
-
-# كل يوم الصبح (9 صباحاً) ساندي بتبعت ملخص يومي تلقائي
-def daily_briefing():
-    """Send daily briefing at 9 AM"""
-    try:
-        briefing = agent.think("قدملي ملخص يومي عن اللي صار")
-        telegram_bot.send_message(SANDY_USER_CHAT_ID, f"[morning] صباح الخير  ! ☀️\n\n{briefing}", parse_mode=None)
-    except Exception as e:
-        print(f"[Briefing] Error: {e}")
-
-# Schedule tasks
-scheduler.add_job(daily_briefing, 'cron', hour=9, minute=0)
-scheduler.add_job(
-    lambda: check_reminders(
-        mongo_db=mongo_db,
-        reminders_file=REMINDERS_FILE,
-        send_message_fn=telegram_bot.send_message,
-        user_chat_id=SANDY_USER_CHAT_ID,
-    ),
-    'interval',
-    minutes=1
+configure_sandy_scheduler(
+    scheduler=scheduler,
+    agent=agent,
+    telegram_bot=telegram_bot,
+    sandy_user_chat_id=SANDY_USER_CHAT_ID,
+    mongo_db=mongo_db,
+    reminders_file=REMINDERS_FILE,
+    check_reminders_fn=check_reminders,
 )
+
 # ═══════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════
@@ -675,68 +577,19 @@ scheduler.add_job(
 # نقطة التشغيل الرئيسية للوكيل ساندي
 def main():
     """Main entry point"""
-    print("=" * 60)
-    print("🦞 Sandy Agent - 24/7 Intelligent Assistant")
-    print("=" * 60)
-    print(f"[Init] OpenAI Model: {OPENAI_MODEL}")
-    print(f"[Init] Telegram Bot: Active")
-    print(f"[Init] Scheduler: Active")
-    print(f"[Init] Memory: Loaded ({len(agent.memory.get('conversations', []))} conversations)")
-    print("=" * 60)
-    print("[Status] Ready! Listening for messages...")
-    print("=" * 60)
-
-    # منطق التشغيل الجديد بناءً على APP_ENV أو RUN_MODE
-    if APP_ENV == "local" or RUN_MODE == "polling":
-        print("[Mode] Local development: Telegram polling mode (APP_ENV=local or RUN_MODE=polling)")
-        # تجاهل RAILWAY_URL تمامًا في الوضع المحلي
-        prepare_telegram_polling(telegram_bot)
-        while True:
-            try:
-                telegram_bot.infinity_polling(
-                    skip_pending=False,
-                    timeout=30,
-                    long_polling_timeout=30,
-                    allowed_updates=["message"]
-                )
-            except Exception as e:
-                msg = str(e)
-                if "Error code: 409" in msg or "terminated by other getUpdates request" in msg:
-                    print("[Telegram] ⚠️ Polling conflict (409). Retrying in 5s...")
-                else:
-                    print(f"[Telegram] ❌ Polling crashed: {e}")
-            time.sleep(5)
-    else:
-        print("[Mode] Production/Server: Webhook mode (APP_ENV=prod/RUN_MODE=webhook)")
-        # فقط في الإنتاج يستخدم RAILWAY_URL وFlask webhook
-
-
-# ═══════════════════════════════════════════════════════════
-# FLASK WEBHOOK MODE (RAILWAY/PRODUCTION)
-# ═══════════════════════════════════════════════════════════
-
-TELEGRAM_SECRET_TOKEN = os.getenv("TELEGRAM_SECRET_TOKEN", "").strip()
-RAILWAY_URL = os.getenv("RAILWAY_URL", "").strip()
-WEBHOOK_PATH = f"/webhook/{TELEGRAM_SECRET_TOKEN}" if TELEGRAM_SECRET_TOKEN else "/webhook"
-
-app = create_telegram_webhook_app(
-    telegram_bot=telegram_bot,
-    webhook_path=WEBHOOK_PATH,
-    telegram_secret_token=TELEGRAM_SECRET_TOKEN,
-)
+    run_sandy_runtime(
+        app_env=APP_ENV,
+        run_mode=RUN_MODE,
+        openai_model=OPENAI_MODEL,
+        agent_memory_count=len(agent.memory.get('conversations', [])),
+        telegram_bot=telegram_bot,
+        telegram_bot_token=TELEGRAM_BOT_TOKEN,
+        railway_url=telegram_webhook_runtime["railway_url"],
+        webhook_path=telegram_webhook_runtime["webhook_path"],
+        telegram_secret_token=telegram_webhook_runtime["telegram_secret_token"],
+        app=telegram_webhook_runtime["app"],
+    )
+    
 
 if __name__ == "__main__":
-    if APP_ENV == "local" or RUN_MODE == "polling":
-        # لا تستدعي set_telegram_webhook إطلاقًا في الوضع المحلي
-        main()
-    else:
-        # في الإنتاج فقط: استخدم webhook
-        set_telegram_webhook(
-            telegram_bot,
-            TELEGRAM_BOT_TOKEN,
-            RAILWAY_URL,
-            WEBHOOK_PATH,
-            TELEGRAM_SECRET_TOKEN,
-        )
-        port = int(os.environ.get("PORT", 8080))
-        app.run(host="0.0.0.0", port=port)
+    main()
