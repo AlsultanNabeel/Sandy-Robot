@@ -163,6 +163,9 @@ AZURE_OPENAI_CHAT_DEPLOYMENT = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT", "").str
 AZURE_OPENAI_VISION_DEPLOYMENT = os.getenv("AZURE_OPENAI_VISION_DEPLOYMENT", "").strip()
 AZURE_OPENAI_STT_DEPLOYMENT = os.getenv("AZURE_OPENAI_STT_DEPLOYMENT", "").strip()
 AZURE_OPENAI_IMAGE_DEPLOYMENT = os.getenv("AZURE_OPENAI_IMAGE_DEPLOYMENT", "").strip()
+AZURE_OPENAI_IMAGE_ENDPOINT = os.getenv("AZURE_OPENAI_IMAGE_ENDPOINT", "").strip()
+AZURE_OPENAI_IMAGE_API_KEY = os.getenv("AZURE_OPENAI_IMAGE_API_KEY", "").strip()
+AZURE_OPENAI_IMAGE_API_VERSION = os.getenv("AZURE_OPENAI_IMAGE_API_VERSION", AZURE_OPENAI_API_VERSION).strip()
 
 # EXA Configuration
 EXA_API_KEY = os.getenv("EXA_API_KEY", "").strip()
@@ -247,6 +250,18 @@ if AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY:
         print("[Azure OpenAI] ✅ Connected")
     except Exception as e:
         print(f"[Azure OpenAI] ⚠️ Failed to initialize: {e}")
+
+azure_image_openai_client = None
+if AZURE_OPENAI_IMAGE_ENDPOINT and AZURE_OPENAI_IMAGE_API_KEY:
+    try:
+        azure_image_openai_client = AzureOpenAI(
+            api_key=AZURE_OPENAI_IMAGE_API_KEY,
+            api_version=AZURE_OPENAI_IMAGE_API_VERSION,
+            azure_endpoint=AZURE_OPENAI_IMAGE_ENDPOINT,
+        )
+        print("[Azure Image] ✅ Connected")
+    except Exception as e:
+        print(f"[Azure Image] ⚠️ Failed to initialize: {e}")
 
 create_chat_completion = make_chat_completion_fn(
     openai_client=openai_client,
@@ -596,7 +611,7 @@ register_basic_telegram_handlers(
     azure_speech_key=AZURE_SPEECH_KEY,
     azure_speech_region=AZURE_SPEECH_REGION,
     azure_speech_voice=AZURE_SPEECH_VOICE,
-    azure_openai_client=azure_openai_client,
+    azure_openai_client=azure_image_openai_client,
     azure_openai_image_deployment=AZURE_OPENAI_IMAGE_DEPLOYMENT,
     analyze_image_with_azure_fn=analyze_image_with_azure,
     download_telegram_file_bytes_fn=download_telegram_file_bytes,
