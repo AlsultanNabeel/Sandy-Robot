@@ -3,17 +3,9 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
+from app.utils.files import read_json_file, write_json_file
 
 
-
-def _read_json_file(path: Path, default: Any) -> Any:
-    if not path or not Path(path).exists():
-        return default
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return default
 
 
 # بترجع كل التذكيرات (من MongoDB أو ملف)
@@ -31,7 +23,7 @@ def load_reminders(mongo_db=None, reminders_file: Optional[Path] = None):
                 return reminders
 
             if reminders_file:
-                json_reminders = _read_json_file(reminders_file, [])
+                json_reminders = read_json_file(reminders_file, [])
                 if isinstance(json_reminders, list) and json_reminders:
                     mongo_db["reminders"].delete_many({"type": "reminder"})
                     for reminder in json_reminders:
@@ -71,13 +63,12 @@ def save_reminders(reminders, mongo_db=None, reminders_file: Optional[Path] = No
 
     if reminders_file:
         try:
-            with open(reminders_file, "w", encoding="utf-8") as f:
-                json.dump(reminders, f, ensure_ascii=False, indent=2)
-            print("[Reminders] 📄 Saved to JSON file")
+            if write_json_file(reminders_file, reminders):
+                print("[Reminders] 📄 Saved to JSON file")
         except Exception as e:
             print(f"[Reminders] Error saving reminders: {e}")
 
-
+ 
 
 # بتضيف تذكير جديد (وتحاول تحلل الوقت تلقائياً لو مش محدد)
 def add_reminder(text, remind_at=None, mongo_db=None, reminders_file: Optional[Path] = None):

@@ -6,6 +6,7 @@ Inspired by OpenClaw, powered by OpenAI GPT-4o
 
 import os
 import json
+from pydoc import text
 import time
 import asyncio
 import threading
@@ -13,7 +14,6 @@ import re
 import io
 import base64
 import tempfile
-from pymongo import results
 import requests
 from collections import deque
 from datetime import datetime, timedelta
@@ -51,14 +51,47 @@ from app.features.reminders import (
     check_reminders,
     plan_reminder_with_ai,
 )
-# MongoDB Integration (Optional - requires MONGODB_URI env var)
-try:
-    from pymongo import MongoClient
-    from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure
-    MONGODB_AVAILABLE = True
-except ImportError:
-    MONGODB_AVAILABLE = False
-    print("[Warning] PyMongo not available. To enable: pip install pymongo>=4.6.0")
+from cloud.app.utils import text
+
+from app.agent.memory import (
+    load_memory,
+    save_memory,
+    load_session,
+    save_session,
+)
+from cloud.app.agent.learning import (
+    get_learning_saturation,
+    extract_facts_from_message,
+    generate_learning_questions,
+)
+from cloud.app.agent.mood import (
+    update_sandy_state,
+    get_sandy_reply,
+)
+from app.agent.learning import (
+    get_learning_saturation,
+    extract_facts_from_message,
+    generate_learning_questions,
+)
+from app.agent.mood import (
+    update_sandy_state,
+    get_sandy_reply,
+)
+from app.integrations.openai_client import make_chat_completion_fn
+from app.integrations.mongodb_store import init_mongo_connection
+from app.integrations.exa_client import search_exa, get_exa_page_content
+from app.features.images import (
+    is_image_generation_request,
+    extract_image_prompt,
+)
+from app.integrations.telegram_api import download_telegram_file_bytes
+from app.integrations.google_tts import synthesize_voice_with_google
+from app.integrations.azure_speech import (
+    transcribe_audio_with_azure,
+    synthesize_voice_with_azure,
+)
+
+
 
 # Try to import Chroma for smart memory
 try:
@@ -103,204 +136,8 @@ MOOD_TTS_VOICES = {
     "tired": os.getenv("GOOGLE_TTS_VOICE_TIRED", "ar-XA-Chirp3-HD-Aoede").strip(),
     "serious": os.getenv("GOOGLE_TTS_VOICE_SERIOUS", "ar-XA-Chirp3-HD-Despina").strip(),
 }
-# بتحول النص لصوت باستخدام Google TTS حسب المزاج والستايل، وبترجع الصوت كـ bytes
-
-def synthesize_voice_with_google(text: str, mood: str = "neutral", style: str = "normal") -> Optional[bytes]:
-    # بتحول النص لصوت باستخدام Google TTS حسب المزاج والستايل، وبترجع الصوت كـ bytes
-    if not text or not GOOGLE_TTS_AVAILABLE:
-        return None
-
-    try:
-        client = texttospeech.TextToSpeechClient()
-        synthesis_input = texttospeech.SynthesisInput(text=text)
-
-        selected_voice = MOOD_TTS_VOICES.get(mood, GOOGLE_TTS_VOICE)
-
-        if style == "romantic":
-            selected_voice = MOOD_TTS_VOICES.get("romantic", selected_voice)
-        elif style == "caring":
-            if mood in ["sad", "angry", "neutral"]:
-                selected_voice = MOOD_TTS_VOICES.get("sad", selected_voice)
-        elif style == "serious":
-            selected_voice = MOOD_TTS_VOICES.get("serious", selected_voice)
-        elif style == "excited":
-            selected_voice = MOOD_TTS_VOICES.get("excited", selected_voice)
-        elif style == "shy":
-            selected_voice = MOOD_TTS_VOICES.get("shy", selected_voice)
-        elif style == "playful":
-            selected_voice = MOOD_TTS_VOICES.get("happy", selected_voice)
-
-        print(f"[Google TTS] Using mood='{mood}' voice='{selected_voice}'")
-
-        voice = texttospeech.VoiceSelectionParams(
-            language_code=GOOGLE_TTS_LANGUAGE_CODE,
-            name=selected_voice,
-            ssml_gender=texttospeech.SsmlVoiceGender.FEMALE,
-        )
-
-        audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.LINEAR16
-        )
-
-        response = client.synthesize_speech(
-            input=synthesis_input,
-            voice=voice,
-            audio_config=audio_config,
-        )
-
-        return response.audio_content
-
-    except Exception as e:
-        print(f"[Google TTS] ❌ Error: {e}")
-        return None
-
 
 # ========== SANDY PERSONALITY ENGINE ==========
-# بتخلي الذكاء الاصطناعي يحزر مزاج ساندي وستايلها من رسالة المستخدم والسياق
-
-def infer_mood_and_style_from_ai(user_message: str, memory: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    # بتخلي الذكاء الاصطناعي يحزر مزاج ساندي وستايلها من رسالة المستخدم والسياق
-    try:
-        previous_state = memory.get("sandy_state", {})
-        previous_mood = previous_state.get("mood", "neutral")
-
-        response = create_chat_completion(
-            temperature=0,
-            max_tokens=180,
-            response_format={"type": "json_object"},
-            prefer_azure=True,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an emotion/context classifier for Sandy, an assistant with memory and personality. "
-                        "Analyze the FULL meaning of the user's message, not just keywords. "
-                        "Return strict JSON only with fields: "
-                        "mood, style, directed_at_sandy, confidence. "
-                        "Allowed moods: happy, sad, angry, bored, neutral, excited, romantic, shy, tired, serious. "
-                        "Allowed styles: normal, caring, romantic, playful, serious, excited, shy. "
-                        "Rules: "
-                        "1) If the user is telling a story about something else, do NOT treat it as directly addressed to Sandy. "
-                        "2) If words like 'sorry' or 'I love you' appear inside a story, do not automatically map them to caring/romantic unless clearly addressed to Sandy. "
-                        "3) Prefer the OVERALL emotional meaning of the message. "
-                        "4) Return only JSON."
-                    )
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"previous_mood={previous_mood}\n"
-                        f"user_message={user_message}"
-                    )
-                }
-            ]
-        )
-
-        payload = json.loads(response.choices[0].message.content or "{}")
-
-        mood = str(payload.get("mood", "neutral")).strip().lower()
-        style = str(payload.get("style", "normal")).strip().lower()
-        directed_at_sandy = bool(payload.get("directed_at_sandy", False))
-        confidence = float(payload.get("confidence", 0.0) or 0.0)
-
-        allowed_moods = {"happy", "sad", "angry", "bored", "neutral", "excited", "romantic", "shy", "tired", "serious"}
-        allowed_styles = {"normal", "caring", "romantic", "playful", "serious", "excited", "shy"}
-
-        if mood not in allowed_moods:
-            mood = "neutral"
-        if style not in allowed_styles:
-            style = "normal"
-
-        return {
-            "mood": mood,
-            "style": style,
-            "directed_at_sandy": directed_at_sandy,
-            "confidence": confidence
-        }
-
-    except Exception as e:
-        print(f"[MoodAI] ⚠️ Failed to infer mood/style: {e}")
-        return None
-
-# بتبحث في الإنترنت عن أي شيء بدك إياه وترجع النتائج بشكل مبسط
-
-def search_exa(query: str, num_results: int = 10) -> List[Dict[str, Any]]:
-    # بتبحث في الإنترنت عن أي شيء بدك إياه وترجع النتائج بشكل مبسط
-    if not EXA_API_KEY:
-        print("[Exa] ⚠️ EXA_API_KEY missing")
-        return []
-
-    try:
-        url = "https://api.exa.ai/search"
-        headers = {
-            "x-api-key": EXA_API_KEY,
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "query": query,
-            "numResults": num_results,
-            "type": "auto",
-            "contents": {
-                "text": True
-            }
-        }
-
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
-        response.raise_for_status()
-        data = response.json()
-
-        results = []
-        for item in data.get("results", []):
-            results.append({
-                "title": str(item.get("title") or "").strip(),
-                "url": str(item.get("url") or "").strip(),
-                "text": str(item.get("text") or "").strip(),
-                "published_date": str(item.get("publishedDate") or "").strip(),
-            })
-        print(f"[Exa] ✅ Found {len(results)} results for query: {query}")
-        return results
-
-    except Exception as e:
-        print(f"[Exa] ❌ Search failed: {e}")
-        return []
-
-
-
-# هاي الدالة بتجيب محتوى الصفحة نفسها من Exa بعد ما نعرف الرابط، عشان نقدر نحلل التفاصيل بدل ما نعتمد فقط على العنوان والـ snippet.
-def get_exa_page_content(url: str) -> Dict[str, Any]:
-    if not EXA_API_KEY:
-        print("[Exa] ⚠️ EXA_API_KEY missing")
-        return {}
-
-    try:
-        api_url = "https://api.exa.ai/contents"
-        headers = {
-            "x-api-key": EXA_API_KEY,
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "urls": [url],
-            "text": True
-        }
-
-        response = requests.post(api_url, headers=headers, json=payload, timeout=60)
-        response.raise_for_status()
-        data = response.json()
-
-        results = data.get("results", [])
-        if not results:
-            return {}
-
-        item = results[0]
-        return {
-            "url": str(item.get("url") or "").strip(),
-            "title": str(item.get("title") or "").strip(),
-            "text": str(item.get("text") or "").strip(),
-        }
-
-    except Exception as e:
-        print(f"[Exa] ❌ Contents fetch failed for {url}: {e}")
-        return {}
 
 
 
@@ -530,7 +367,11 @@ def normalize_education_page_data(page_data: Dict[str, Any], source_url: str = "
 def run_research_pipeline(user_query: str, research_type: str = "general", requested_count: int = 5) -> List[Dict[str, Any]]:
     print(f"[Research] 🔍 Starting {research_type} research for: {user_query}")
 
-    exa_results = search_exa(user_query, num_results=WEB_RESEARCH_MAX_CANDIDATES)
+    exa_results = search_exa(
+        user_query,
+        exa_api_key=EXA_API_KEY,
+        num_results=WEB_RESEARCH_MAX_CANDIDATES
+    )
     if not exa_results:
         return []
 
@@ -658,7 +499,10 @@ Return the result as structured data.
 
     for item in candidates[: max(requested_count * 2, requested_count)]:
         url = item.get("url", "")
-        page_content = get_exa_page_content(url)
+        page_content = get_exa_page_content(
+            url,
+            exa_api_key=EXA_API_KEY,
+        )
         page_data = extract_structured_page_data(page_content, research_type=research_type)
 
         if research_type == "education":
@@ -681,108 +525,6 @@ Return the result as structured data.
 
     return deduped_results
 
-
-
-# بتحدث مزاج وحالة ساندي حسب الرسالة، أول شي بتجرب AI، وإذا فشل بتستخدم قواعد بسيطة
-
-def update_sandy_state(memory: Dict[str, Any], user_message: str) -> None:
-    # بتحدث مزاج وحالة ساندي حسب الرسالة، أول شي بتجرب AI، وإذا فشل بتستخدم قواعد بسيطة
-    now = datetime.now()
-    state = memory.get("sandy_state", {})
-
-    last_time = datetime.fromisoformat(state.get("last_user_message_time", now.isoformat()))
-    last_msg = state.get("last_message", "")
-    repeat_count = state.get("repeat_count", 0)
-    snapped = state.get("snapped", False)
-    previous_mood = state.get("mood", "neutral")
-
-    # Repeat detection
-    if user_message.strip() == last_msg.strip():
-        repeat_count += 1
-    else:
-        repeat_count = 0
-        snapped = False
-
-    ai_result = infer_mood_and_style_from_ai(user_message, memory)
-
-    mood = previous_mood
-    style = state.get("style", "normal")
-    directed_at_sandy = False
-
-    if ai_result and ai_result.get("confidence", 0) >= 0.65:
-        mood = ai_result.get("mood", "neutral")
-        style = ai_result.get("style", "normal")
-        directed_at_sandy = ai_result.get("directed_at_sandy", False)
-    else:
-        # Fallback logic فقط إذا AI فشل
-        hours_since_last = (now - last_time).total_seconds() / 3600
-
-        lowered_message = (user_message or "").lower()
-
-        if hours_since_last > 24:
-            mood = "angry"
-        elif hours_since_last > 6:
-            mood = "sad"
-        else:
-            mood = "neutral"
-
-        style = "normal"
-
-        if any(word in lowered_message for word in ["واو", "رائع", "روعة", "متحمس", "متحمسة", "مبسوطة", "مبسوط", "excited"]):
-            mood = "excited"
-            style = "excited"
-
-        elif any(word in lowered_message for word in ["بحبك", "اشتقت", "حبي", "love you", "missed you"]):
-            mood = "romantic"
-            style = "romantic"
-            directed_at_sandy = True
-
-        elif any(word in lowered_message for word in ["آسف", "سوري", "sorry"]):
-            mood = "happy"
-            style = "caring"
-            directed_at_sandy = True
-
-        elif any(word in lowered_message for word in ["استحيت", "محرج", "خجلان", "خجلانة", "shy"]):
-            mood = "shy"
-            style = "shy"
-
-        elif any(word in lowered_message for word in ["تعبان", "تعبانة", "نعسان", "نعسانة", "مرهق", "مرهقة", "tired"]):
-            mood = "tired"
-            style = "normal"
-
-        elif any(word in lowered_message for word in ["ركز", "مهم", "بسرعة", "رسمي", "جاد", "serious"]):
-            mood = "serious"
-            style = "serious"
-
-    # Repetition override
-    if repeat_count >= 3 and mood not in ["romantic", "excited"]:
-        mood = "bored"
-        style = "serious"
-        if repeat_count >= 6:
-            snapped = True
-
-    state.update({
-        "mood": mood,
-        "style": style,
-        "directed_at_sandy": directed_at_sandy,
-        "last_user_message_time": now.isoformat(),
-        "repeat_count": repeat_count,
-        "last_message": user_message,
-        "snapped": snapped,
-        "last_mood_change": now.isoformat() if mood != previous_mood else state.get("last_mood_change", now.isoformat())
-    })
-
-    memory["sandy_state"] = state
-
-
-# بتولد رد ساندي حسب المزاج والحالة، بس حالياً بترجع الرد الافتراضي
-
-def get_sandy_reply(user_message: str, memory: Dict[str, Any], default_reply: str) -> str:
-    # بتولد رد ساندي حسب المزاج والحالة، بس حالياً بترجع الرد الافتراضي
-    return default_reply
-
-
-import emoji
 
 
 # ═══════════════════════════════════════════════════════════
@@ -849,67 +591,12 @@ SANDY_USER_CHAT_ID = os.getenv("SANDY_USER_CHAT_ID", "").strip()
 # MongoDB Configuration
 MONGODB_URI = os.getenv("MONGODB_URI", "").strip()
 MONGODB_DB_NAME = os.getenv("MONGODB_DB_NAME", "sany-db").strip()
+mongo_client, mongo_db = init_mongo_connection(
+    MONGODB_URI,
+    MONGODB_DB_NAME,
+)
 
 
-
-# Initialize MongoDB connection
-mongo_client = None
-mongo_db = None
-
-if MONGODB_AVAILABLE and MONGODB_URI:
-    def _connect_mongo(uri: str) -> Optional[MongoClient]:
-        """Build Mongo client with Atlas-friendly TLS defaults for cloud runtimes."""
-        base_kwargs = {
-            "serverSelectionTimeoutMS": 20000,
-            "connectTimeoutMS": 20000,
-            "socketTimeoutMS": 20000,
-            "retryWrites": True,
-            "maxPoolSize": 10,
-            "minPoolSize": 1,
-            "appname": "sandy-railway-agent"
-        }
-
-        # Preferred path: validate Atlas certificate chain using certifi bundle.
-        client = MongoClient(
-            uri,
-            tls=True,
-            tlsCAFile=certifi.where(),
-            **base_kwargs
-        )
-        client.admin.command('ping')
-        return client
-
-    try:
-        mongo_client = _connect_mongo(MONGODB_URI)
-        mongo_db = mongo_client[MONGODB_DB_NAME]
-        print(f"[MongoDB] ✅ Connected successfully (db={MONGODB_DB_NAME})")
-    except Exception as first_error:
-        print(f"[MongoDB] ⚠️ Primary TLS connection failed: {first_error}")
-        try:
-            # Last-resort compatibility mode for edge runtime TLS issues.
-            mongo_client = MongoClient(
-                MONGODB_URI,
-                serverSelectionTimeoutMS=20000,
-                connectTimeoutMS=20000,
-                socketTimeoutMS=20000,
-                tls=True,
-                tlsAllowInvalidCertificates=True,
-                retryWrites=True,
-                maxPoolSize=10,
-                minPoolSize=1,
-                appname="sandy-railway-agent-fallback"
-            )
-            mongo_client.admin.command('ping')
-            mongo_db = mongo_client[MONGODB_DB_NAME]
-            print(f"[MongoDB] ✅ Connected with fallback TLS mode (db={MONGODB_DB_NAME})")
-        except Exception as second_error:
-            print(f"[MongoDB] ⚠️ Connection failed: {second_error}")
-            print("[MongoDB] Hint: check Atlas Network Access allowlist and URI credentials")
-            print("[MongoDB] Falling back to JSON memory")
-            mongo_client = None
-            mongo_db = None
-else:
-    print("[MongoDB] ⚠️ MONGODB_URI not set, using JSON memory for now")
 
 # DEBUG: Print what we're reading
 print("[DEBUG STARTUP] Environment Variables:")
@@ -965,119 +652,20 @@ if AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY:
     except Exception as e:
         print(f"[Azure OpenAI] ⚠️ Failed to initialize: {e}")
 
+create_chat_completion = make_chat_completion_fn(
+    openai_client=openai_client,
+    azure_openai_client=azure_openai_client,
+    openai_model=OPENAI_MODEL,
+    azure_chat_deployment=AZURE_OPENAI_CHAT_DEPLOYMENT,
+)
+
 telegram_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=True)
 scheduler = BackgroundScheduler(timezone=None)
 scheduler.start()
 
-def _chat_client_and_model(prefer_azure: bool = True, model_hint: Optional[str] = None):
-    """Select chat client/model with Azure-first strategy when configured."""
-    if prefer_azure and azure_openai_client is not None:
-        model_name = model_hint or AZURE_OPENAI_CHAT_DEPLOYMENT or OPENAI_MODEL
-        return azure_openai_client, model_name
-    return openai_client, (model_hint or OPENAI_MODEL)
 
-def create_chat_completion(messages: List[Dict[str, Any]], temperature: float = 0.7,
-                           max_tokens: int = 500, response_format: Optional[Dict[str, Any]] = None,
-                           prefer_azure: bool = True, model_hint: Optional[str] = None):
-    """Unified chat completion helper for Azure/OpenAI with optional structured output."""
-    client, model_name = _chat_client_and_model(prefer_azure=prefer_azure, model_hint=model_hint)
-    kwargs = {
-        "model": model_name,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens
-    }
-    if response_format is not None:
-        kwargs["response_format"] = response_format
-    return client.chat.completions.create(**kwargs)
-
-def download_telegram_file_bytes(file_id: str) -> Optional[tuple]:
-    """Download telegram file bytes. Returns (bytes, file_path) or None."""
-    try:
-        file_info = telegram_bot.get_file(file_id)
-        data = telegram_bot.download_file(file_info.file_path)
-        return data, file_info.file_path
-    except Exception as e:
-        print(f"[Telegram] ❌ File download failed: {e}")
-        return None
-
-def transcribe_audio_with_azure(audio_bytes: bytes, file_name: str = "voice.ogg") -> Optional[str]:
-    """Transcribe audio bytes using Azure OpenAI transcription deployment."""
-    if azure_openai_client is None or not AZURE_OPENAI_STT_DEPLOYMENT:
-        print("[Azure STT] ⚠️ Missing Azure OpenAI client or STT deployment")
-        return None
-
-    suffix = Path(file_name).suffix or ".ogg"
-    temp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-            tmp.write(audio_bytes)
-            temp_path = tmp.name
-
-        with open(temp_path, "rb") as f:
-            result = azure_openai_client.audio.transcriptions.create(
-                model=AZURE_OPENAI_STT_DEPLOYMENT,
-                file=f
-            )
-        transcript = (getattr(result, "text", "") or "").strip()
-        if transcript:
-            print(f"[Azure STT] ✅ Transcript: {transcript[:80]}")
-            return transcript
-    except Exception as e:
-        print(f"[Azure STT] ❌ Transcription failed: {e}")
-    finally:
-        if temp_path and Path(temp_path).exists():
-            try:
-                Path(temp_path).unlink()
-            except Exception:
-                pass
-    return None
-
-# بتحول النص لصوت باستخدام Azure TTS وبتعطيك الصوت كـ wav
-
-def synthesize_voice_with_azure(text: str) -> Optional[bytes]:
-    # بتحول النص لصوت باستخدام Azure TTS وبتعطيك الصوت كـ wav
-    if not text:
-        return None
-    if not AZURE_SPEECH_AVAILABLE or not AZURE_SPEECH_KEY or not AZURE_SPEECH_REGION:
-        print("[Azure TTS] ⚠️ Speech SDK/key/region not configured")
-        return None
-
-    temp_path = None
-    try:
-        speech_config = speechsdk.SpeechConfig(subscription=AZURE_SPEECH_KEY, region=AZURE_SPEECH_REGION)
-        speech_config.speech_synthesis_voice_name = AZURE_SPEECH_VOICE
-        # أعلى جودة متاحة: 48Khz/192Kbps Mono PCM
-        speech_config.set_speech_synthesis_output_format(
-            speechsdk.SpeechSynthesisOutputFormat.Riff16Khz16BitMonoPcm
-        )
-
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            temp_path = tmp.name
-
-        audio_config = speechsdk.audio.AudioOutputConfig(filename=temp_path)
-        synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=audio_config)
-        result = synthesizer.speak_text_async(text).get()
-
-        if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted and Path(temp_path).exists():
-            with open(temp_path, "rb") as f:
-                audio_bytes = f.read()
-            print("[Azure TTS] ✅ Voice generated (48Khz/192Kbps)")
-            return audio_bytes
-
-        print(f"[Azure TTS] ❌ Synthesis failed: {result.reason}")
-    except Exception as e:
-        print(f"[Azure TTS] ❌ Error: {e}")
-    finally:
-        if temp_path and Path(temp_path).exists():
-            try:
-                Path(temp_path).unlink()
-            except Exception:
-                pass
-    return None
 
 # بتحلل صورة باستخدام Azure/OpenAI وبتعطيك وصف مختصر بالعربي
-
 def analyze_image_with_azure(image_bytes: bytes, prompt: str) -> str:
     """Analyze image bytes using Azure/OpenAI multimodal chat."""
     if not image_bytes:
@@ -1152,26 +740,6 @@ def generate_image_with_azure(prompt: str, size: str = "1024x1024") -> Optional[
 
     return None
 
-# بتشيك إذا المستخدم طلب رسم أو توليد صورة
-
-def is_image_generation_request(message: str) -> bool:
-    """Detect if user asks for image generation."""
-    text = (message or "").strip().lower()
-    triggers = [
-        "ارسم", "رسمة", "صمم صورة", "ولّد صورة", "generate image", "draw"
-    ]
-    return any(t in text for t in triggers)
-
-# بتطلع وصف الصورة من رسالة المستخدم بعد ما يشيل الأمر أو الكلمات المفتاحية
-
-def extract_image_prompt(message: str) -> str:
-    """Extract prompt text for image generation."""
-    text = (message or "").strip()
-    text = re.sub(r'^(?:/image|/img)\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'(?:ارسم|رسمة|صمم صورة|ول\s*د صورة|ولّد صورة|generate image|draw)\s*', '', text, flags=re.IGNORECASE)
-    text = re.sub(r'\s+', ' ', text).strip()
-    return text
-
 
 # بتبعت رسالة نصية للمستخدم، ولو فيه صوت بتبعت كمان رد صوتي
 def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Optional[int] = None):
@@ -1207,7 +775,10 @@ def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Opti
     audio_bytes = synthesize_voice_with_google(
         tts_text,
         mood=current_mood,
-        style=current_style
+        style=current_style,
+        google_tts_voice=GOOGLE_TTS_VOICE,
+        google_tts_language_code=GOOGLE_TTS_LANGUAGE_CODE,
+        mood_tts_voices=MOOD_TTS_VOICES,
     )
 
     if audio_bytes:
@@ -1215,7 +786,13 @@ def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Opti
         source = "Google TTS"
     else:
         print("[DEBUG] Google TTS failed. Trying Azure TTS...")
-        audio_bytes = synthesize_voice_with_azure(tts_text)
+        audio_bytes = synthesize_voice_with_azure(
+            tts_text,
+            azure_speech_available=AZURE_SPEECH_AVAILABLE,
+            azure_speech_key=AZURE_SPEECH_KEY,
+            azure_speech_region=AZURE_SPEECH_REGION,
+            azure_speech_voice=AZURE_SPEECH_VOICE,
+        )
         if audio_bytes:
             print("[DEBUG] Azure TTS succeeded. Sending Azure voice reply.")
             source = "Azure TTS"
@@ -1233,287 +810,6 @@ def send_text_and_voice_reply(chat_id: int, text: str, reply_to_message_id: Opti
 
 
 # ═══════════════════════════════════════════════════════════
-# MEMORY MANAGEMENT (MongoDB + JSON Fallback)
-# ═══════════════════════════════════════════════════════════
-
-# بتقرأ ملف JSON بأمان وبترجع الديفولت لو صار خطأ
-
-def _read_json_file(path: Path, default: Any) -> Any:
-    """Read JSON file safely and return default on any failure."""
-    if not path.exists():
-        return default
-    try:
-        with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"[JSON] Error reading {path.name}: {e}")
-        return default
-
-# بترجع ذاكرة ساندي (من MongoDB أو من ملف)
-
-def load_memory() -> Dict[str, Any]:
-    """Load persistent memory from MongoDB or disk"""
-    default_memory = {
-        "conversations": [],
-        "facts": [],
-        "reminders": [],
-        "tasks": [],
-        "sandy_state": {
-            "mood": "happy",  # happy, sad, angry, bored, neutral
-            "last_user_message_time": datetime.now().isoformat(),
-            "repeat_count": 0,
-            "last_message": "",
-            "snapped": False,  # هل انفجرت من التكرار
-            "last_mood_change": datetime.now().isoformat(),
-            "custom_facts": []  # تفضيلات أو أشياء خاصة يتعلمها عنك
-        }
-    }
-    
-    # Try MongoDB first
-    if mongo_db is not None:
-        try:
-            memory_doc = mongo_db['memory'].find_one({"_id": "sandy_memory"})
-            if memory_doc:
-                memory_doc.pop("_id", None)  # Remove MongoDB ID
-                print("[Memory] ✅ Loaded from MongoDB")
-                return memory_doc
-
-            # One-time migration path: seed Mongo from JSON if available.
-            json_memory = _read_json_file(MEMORY_FILE, None)
-            if isinstance(json_memory, dict):
-                mongo_db['memory'].replace_one(
-                    {"_id": "sandy_memory"},
-                    {**json_memory, "_id": "sandy_memory"},
-                    upsert=True
-                )
-                print("[Memory] 🔁 Migrated JSON -> MongoDB")
-                return json_memory
-
-            print("[Memory] ✅ MongoDB is source of truth (new memory)")
-            return default_memory
-        except Exception as e:
-            print(f"[Memory] ⚠️ MongoDB error: {e}, falling back to JSON")
-    
-    # Fallback to JSON file
-    memory_json = _read_json_file(MEMORY_FILE, None)
-    if isinstance(memory_json, dict):
-        print("[Memory] 📄 Loaded from JSON file")
-        return memory_json
-    
-    # Return default structure
-    return default_memory
-
-# بتخزن ذاكرة ساندي (في MongoDB أو ملف)
-
-def save_memory(memory: Dict[str, Any]):
-    """Save memory to MongoDB or disk"""
-    
-    # Try MongoDB first
-    if mongo_db is not None:
-        try:
-            memory_with_id = {**memory, "_id": "sandy_memory"}
-            mongo_db['memory'].replace_one(
-                {"_id": "sandy_memory"},
-                memory_with_id,
-                upsert=True
-            )
-            print("[Memory] ✅ Saved to MongoDB")
-            return
-        except Exception as e:
-            print(f"[Memory] ⚠️ MongoDB save error: {e}, falling back to JSON")
-    
-    # Fallback to JSON file
-    try:
-        with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(memory, f, ensure_ascii=False, indent=2)
-            print("[Memory] 📄 Saved to JSON file")
-    except Exception as e:
-        print(f"[Memory] Error saving memory: {e}")
-
-# بترجع جلسة المحادثة الحالية (من MongoDB أو ملف)
-
-def load_session() -> Dict[str, Any]:
-    """Load current session memory from MongoDB or disk"""
-    default_session = {"messages": []}
-    
-    # Try MongoDB first
-    if mongo_db is not None:
-        try:
-            session_doc = mongo_db['sessions'].find_one({"_id": "current_session"})
-            if session_doc:
-                session_doc.pop("_id", None)
-                print("[Session] ✅ Loaded from MongoDB")
-                return session_doc
-
-            json_session = _read_json_file(SESSION_FILE, None)
-            if isinstance(json_session, dict):
-                mongo_db['sessions'].replace_one(
-                    {"_id": "current_session"},
-                    {**json_session, "_id": "current_session"},
-                    upsert=True
-                )
-                print("[Session] 🔁 Migrated JSON -> MongoDB")
-                return json_session
-
-            print("[Session] ✅ MongoDB is source of truth (new session)")
-            return default_session
-        except Exception as e:
-            print(f"[Session] ⚠️ MongoDB error: {e}")
-    
-    # Fallback to JSON file
-    session_json = _read_json_file(SESSION_FILE, None)
-    if isinstance(session_json, dict):
-        print("[Session] 📄 Loaded from JSON file")
-        return session_json
-    
-    return default_session
-
-# بتخزن جلسة المحادثة الحالية (في MongoDB أو ملف)
-
-def save_session(session: Dict[str, Any]):
-    """Save session memory to MongoDB or disk"""
-    
-    # Try MongoDB first
-    if mongo_db is not None:
-        try:
-            session_with_id = {**session, "_id": "current_session"}
-            mongo_db['sessions'].replace_one(
-                {"_id": "current_session"},
-                session_with_id,
-                upsert=True
-            )
-            print("[Session] ✅ Saved to MongoDB")
-            return
-        except Exception as e:
-            print(f"[Session] ⚠️ MongoDB save error: {e}")
-    
-    # Fallback to JSON file
-    try:
-        with open(SESSION_FILE, 'w', encoding='utf-8') as f:
-            json.dump(session, f, ensure_ascii=False, indent=2)
-            print("[Session] 📄 Saved to JSON file")
-    except Exception as e:
-        print(f"[Session] Error saving session: {e}")
-
-# ═══════════════════════════════════════════════════════════
-# SMART LEARNING FUNCTIONS
-# ═══════════════════════════════════════════════════════════
-
-# بتحدد مستوى معرفة ساندي عن المستخدم (مبتدئ، فضولي...)
-
-def get_learning_saturation(memory: Dict[str, Any]) -> Dict[str, Any]:
-    """حسب مستوى معرفة Sandy عن المستخدم"""
-    facts = memory.get('facts', [])
-    fact_types = {}
-    
-    for fact in facts:
-        fact_type = fact.get('type', 'unknown')
-        fact_types[fact_type] = fact_types.get(fact_type, 0) + 1
-    
-    total_facts = len(facts)
-    
-    # حدد المستوى
-    if total_facts == 0:
-        level = "BEGINNER"  # ما تعرف شي!
-    elif total_facts < 5:
-        level = "CURIOUS"  # بتتعلم الأساسيات
-    elif total_facts < 15:
-        level = "LEARNING"  # بتفهم أكتر
-    elif total_facts < 30:
-        level = "FAMILIAR"  # صارت صديقة
-    else:
-        level = "EXPERT"  # عرفت كل شي
-    
-    return {
-        "level": level,
-        "total_facts": total_facts,
-        "fact_types": fact_types,
-        "should_ask": level in ["BEGINNER", "CURIOUS", "LEARNING"]
-    }
-
-# بتقرر إذا ساندي لازم تسأل سؤال جديد حسب مستوى المعرفة
-
-def should_ask_question_smart(memory: Dict[str, Any], fact_type: str) -> bool:
-    """
-    هل Sandy بتسأل سؤال؟
-    Smart decision بناءً على المستوى
-    """
-    saturation = get_learning_saturation(memory)
-    existing_count = saturation.get('fact_types', {}).get(fact_type, 0)
-    level = saturation['level']
-    
-    rules = {
-        "BEGINNER": existing_count < 2,    # اسأل كل شي!
-        "CURIOUS": existing_count < 3,     # اسأل الحقائق الجديدة
-        "LEARNING": existing_count < 4,    # اسأل بشكل محدود
-        "FAMILIAR": existing_count < 5,    # نادراً ما تسأل
-        "EXPERT": False                     # ما بتسأل تقريباً
-    }
-    
-    return rules.get(level, False)
-
-# بتستخرج حقائق جديدة من رسالة المستخدم لو فيها معلومة مهمة
-
-def extract_facts_from_message(message: str, memory: Dict[str, Any]) -> List[str]:
-    """استخرج حقائق جديدة من رسالة المستخدم"""
-    facts = []
-    
-    # Pattern matching for common facts
-    patterns = {
-        "سمي|اسمي|اسمي هو|أنا اسمي": "owner_name",
-        "اشتغل|وظيفتي|اشتغل في|أعمل في": "owner_job",
-        "عمري|سني|اسكن|أسكن في": "owner_info",
-        "أحب|بحب|يعجبني": "owner_preference",
-        "ساندي|اسمك|اسمي": "sandy_info"
-    }
-    
-    for pattern, fact_type in patterns.items():
-        if any(word in message for word in pattern.split("|")):
-            facts.append({
-                "type": fact_type,
-                "text": message,
-                "timestamp": datetime.now().isoformat(),
-                "learned": True
-            })
-    
-    return facts
-
-# بتولد سؤال ذكي للمستخدم حسب الرسالة ومستوى المعرفة
-
-def generate_learning_questions(user_message: str, memory: Dict[str, Any]) -> Optional[str]:
-    """توليد أسئلة ذكية بناءً على الرسالة والمستوى"""
-    
-    # Get current saturation level
-    saturation = get_learning_saturation(memory)
-    level = saturation['level']
-    
-    # لو وصلت لـ EXPERT، ما حاجة نسأل أسئلة كتيرة
-    if level == "EXPERT":
-        return None  # No questions needed
-    
-    existing_facts = memory.get('facts', [])
-    learned_topics = {f.get('type') for f in existing_facts}
-    
-    questions = []
-    
-    # Ask about owner if not learned - but smart!
-    if should_ask_question_smart(memory, "owner_name") and "owner" in user_message.lower():
-        questions.append("أنا عرفت أنك تتحدّث عن نفسك! 🤔 ممكن تقول لي اسمك بالكامل؟")
-    
-    if should_ask_question_smart(memory, "owner_job") and ("اشتغل" in user_message or "work" in user_message):
-        questions.append("اهتمام لحالك! 💼 تقول لي شنو بتشتغل بالضبط؟")
-    
-    if "sandy_info" not in learned_topics and ("ساندي" in user_message or "robot" in user_message.lower()):
-        questions.append("بديني أعرّف نفسي أحسن! 🤖 شنو بتحب تنادي عليك اسمي؟ وشنو وظيفتي عندك؟")
-    
-    # Ask about preferences
-    # تم تعطيل الرد التلقائي على كلمة "احب" أو "حب" بناءً على طلب المستخدم
-    
-    return questions[0] if questions else None
-
-
-
-# ═══════════════════════════════════════════════════════════
 # SANDY AGENT LOGIC
 # ═══════════════════════════════════════════════════════════
 
@@ -1521,8 +817,8 @@ def generate_learning_questions(user_message: str, memory: Dict[str, Any]) -> Op
 
 class SandyAgent:
     def __init__(self):
-        self.memory = load_memory()
-        self.session = load_session()
+        self.memory = load_memory(memory_file=MEMORY_FILE, mongo_db=mongo_db)
+        self.session = load_session(session_file=SESSION_FILE, mongo_db=mongo_db)
         self.is_speaking = False
         self.last_activity = datetime.now()
         self.last_research_results = []
@@ -1614,8 +910,12 @@ class SandyAgent:
     def think(self, user_message: str) -> str:
         """Process message through OpenAI and generate response, with mood/memory logic"""
         try:
-            update_sandy_state(self.memory, user_message)
-            save_memory(self.memory)
+            update_sandy_state(
+                self.memory,
+                user_message,
+                create_chat_completion_fn=create_chat_completion,
+            )           
+            save_memory(self.memory, memory_file=MEMORY_FILE, mongo_db=mongo_db)
 
             if is_research_followup_request(user_message) and self.last_research_results:
                 requested_count = extract_requested_result_count(user_message, default=5)
@@ -1731,7 +1031,7 @@ class SandyAgent:
                 "timestamp": datetime.now().isoformat()
             })
 
-            save_session(self.session)
+            save_session(self.session, session_file=SESSION_FILE, mongo_db=mongo_db)
 
             new_facts = extract_facts_from_message(user_message, self.memory)
             if new_facts:
@@ -1757,7 +1057,7 @@ class SandyAgent:
             if len(self.memory['conversations']) > 100:
                 self.memory['conversations'] = self.memory['conversations'][-100:]
 
-            save_memory(self.memory)
+            save_memory(self.memory, memory_file=MEMORY_FILE, mongo_db=mongo_db)
 
             return get_sandy_reply(user_message, self.memory, assistant_message)
 
@@ -1771,37 +1071,29 @@ class SandyAgent:
         """Add important fact to memory"""
         if fact not in self.memory.get('facts', []):
             self.memory['facts'].append(fact)
-            save_memory(self.memory)
+            save_memory(self.memory, memory_file=MEMORY_FILE, mongo_db=mongo_db)
 
-    def add_reminder(self, text: str, remind_at: str = None):
-        """Add reminder to memory"""
-        reminder = {
-            "text": text,
-            "created": datetime.now().isoformat(),
-            "remind_at": remind_at
-        }
-        self.memory['reminders'].append(reminder)
-        save_memory(self.memory)
 
-    def create_task(self, task_text: str) -> str:
-        """Create a new task"""
-        return add_task(task_text)
+def create_task(self, task_text: str) -> str:
+    """Create a new task"""
+    return add_task(task_text, mongo_db=mongo_db, tasks_file=TASKS_FILE)
 
-    def finish_task(self, task_id: str) -> bool:
-        """Mark task as done"""
-        return complete_task(task_id)
+def finish_task(self, task_id: str) -> bool:
+    """Mark task as done"""
+    return complete_task(task_id, mongo_db=mongo_db, tasks_file=TASKS_FILE)
 
-    def show_tasks(self) -> str:
-        """Show all pending tasks"""
-        return list_tasks()
+def show_tasks(self) -> str:
+    """Show all pending tasks"""
+    return list_tasks(mongo_db=mongo_db, tasks_file=TASKS_FILE)
 
-    def create_reminder(self, text: str, remind_at: str = None) -> str:
-        """Create a new reminder"""
-        return add_reminder(text, remind_at, mongo_db=mongo_db, reminders_file=REMINDERS_FILE)
+def create_reminder(self, text: str, remind_at: str = None) -> str:
+    """Create a new reminder"""
+    add_reminder(text, remind_at, mongo_db=mongo_db, reminders_file=REMINDERS_FILE)
+    return f"[happy] تمام ✅ سجلت التذكير: {text}"
 
-    def show_pending_reminders(self) -> Optional[str]:
-        """Check and show pending reminders"""
-        return check_reminders(mongo_db=mongo_db, reminders_file=REMINDERS_FILE)
+def show_pending_reminders(self) -> Optional[str]:
+    """Check and show pending reminders"""
+    return check_reminders(mongo_db=mongo_db, reminders_file=REMINDERS_FILE)
 
 # ═══════════════════════════════════════════════════════════
 # TELEGRAM BOT HANDLERS
@@ -1912,7 +1204,7 @@ def handle_photo(message):
             telegram_bot.reply_to(message, "[think] ما وصلتني الصورة بشكل صحيح.")
             return
 
-        downloaded = download_telegram_file_bytes(photo.file_id)
+        downloaded = download_telegram_file_bytes(telegram_bot, photo.file_id)
         if not downloaded:
             telegram_bot.reply_to(message, "[think] ما قدرت أحمّل الصورة من تيليجرام.")
             return
@@ -1950,7 +1242,7 @@ def handle_video(message):
             )
             return
 
-        downloaded = download_telegram_file_bytes(thumb.file_id)
+        downloaded = download_telegram_file_bytes(telegram_bot, thumb.file_id)
         if not downloaded:
             telegram_bot.reply_to(message, "[think] ما قدرت أحمّل معاينة الفيديو.")
             return
@@ -1982,13 +1274,18 @@ def handle_voice_or_audio(message):
             telegram_bot.reply_to(message, "[think] ما قدرت أقرأ الملف الصوتي.")
             return
 
-        downloaded = download_telegram_file_bytes(media_obj.file_id)
+        downloaded = download_telegram_file_bytes(telegram_bot, media_obj.file_id)
         if not downloaded:
             telegram_bot.reply_to(message, "[think] ما قدرت أحمّل الصوت من تيليجرام.")
             return
 
         audio_bytes, file_path = downloaded
-        transcript = transcribe_audio_with_azure(audio_bytes, file_path)
+        transcript = transcribe_audio_with_azure(
+            audio_bytes,
+            azure_openai_client=azure_openai_client,
+            azure_openai_stt_deployment=AZURE_OPENAI_STT_DEPLOYMENT,
+            file_name=file_path,
+        )
         if not transcript:
             telegram_bot.reply_to(message, "[think] ما قدرت أحول الصوت لنص. تأكد من إعداد Azure STT.")
             return
@@ -2069,7 +1366,6 @@ def handle_message(message):
 # ═══════════════════════════════════════════════════════════
 
 # كل يوم الصبح (9 صباحاً) ساندي بتبعت ملخص يومي تلقائي
-
 def daily_briefing():
     """Send daily briefing at 9 AM"""
     try:
