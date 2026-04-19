@@ -148,6 +148,12 @@ def register_basic_telegram_handlers(
                 telegram_bot.reply_to(message, result.get("reply_text") or "[think] ما قدرت أولد الصورة حالياً.")
                 return
 
+            if result.get("text_only"):
+                if persist_agent_session_fn is not None:
+                    persist_agent_session_fn()
+                telegram_bot.reply_to(message, result.get("reply_text") or "تمام.")
+                return
+
             telegram_bot.send_chat_action(chat_id, "upload_photo")
             photo_file = io.BytesIO(result["image_bytes"])
             photo_file.name = "sandy_generated.png"
@@ -377,6 +383,12 @@ def register_basic_telegram_handlers(
 
                 if not image_result.get("success"):
                     telegram_bot.reply_to(message, image_result.get("reply_text") or "[think] ما قدرت أولد الصورة حالياً.")
+                    return
+
+                if image_result.get("text_only"):
+                    if persist_agent_session_fn is not None:
+                        persist_agent_session_fn()
+                    telegram_bot.reply_to(message, image_result.get("reply_text") or "تمام.")
                     return
 
                 telegram_bot.send_chat_action(chat_id, "upload_photo")

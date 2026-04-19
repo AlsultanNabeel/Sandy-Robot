@@ -69,6 +69,47 @@ def _fallback_edit_image_prompt(text: str, active_image: Optional[Dict[str, Any]
     return text
 
 
+def _recent_image_history_text(image_state: Optional[Dict[str, Any]]) -> str:
+    history = (image_state or {}).get("history") or []
+    if not isinstance(history, list):
+        return "[]"
+
+    tail = []
+    for item in history[-3:]:
+        if not isinstance(item, dict):
+            continue
+        tail.append(
+            {
+                "user_request": item.get("user_request", ""),
+                "short_caption_ar": item.get("short_caption_ar", ""),
+                "action": item.get("action", ""),
+                "created_at": item.get("created_at", ""),
+            }
+        )
+    return json.dumps(tail, ensure_ascii=False)
+
+
+
+def _recent_image_history_text(image_state: Optional[Dict[str, Any]]) -> str:
+    history = (image_state or {}).get("history") or []
+    if not isinstance(history, list):
+        return "[]"
+
+    tail = []
+    for item in history[-3:]:
+        if not isinstance(item, dict):
+            continue
+        tail.append(
+            {
+                "user_request": item.get("user_request", ""),
+                "short_caption_ar": item.get("short_caption_ar", ""),
+                "action": item.get("action", ""),
+                "created_at": item.get("created_at", ""),
+            }
+        )
+    return json.dumps(tail, ensure_ascii=False)
+
+
 def plan_image_action_with_ai(
     user_message: str,
     *,
@@ -82,6 +123,7 @@ def plan_image_action_with_ai(
     image_state = ensure_image_state(session)
     active_image = image_state.get("active_image") or {}
     pending_image_action = image_state.get("pending_image_action") or {}
+    recent_history_text = _recent_image_history_text(image_state)
     direct_prompt = _extract_direct_command_prompt(text)
     is_direct_command = bool(_DIRECT_COMMAND_RE.match(text))
 
@@ -115,28 +157,33 @@ def plan_image_action_with_ai(
                     "role": "system",
                     "content": (
                         "You are Sandy's image-intent planner. Return strict JSON only. "
-                        "Decide whether the user is asking to create a new image, continue/modify the last generated image, "
-                        "or is not talking about images at all. "
-                        "Output fields exactly: handled (bool), action (string), generation_prompt (string), "
-                        "short_caption_ar (string), needs_followup (bool), followup_question (string). "
-                        "Valid action values: none, generate_new, edit_last, variation, clarify. "
+                        "Decide whether the user is asking to create a brand new image, modify the last generated image, request a variation, ask for clarification, or is not talking about images at all. "
+                        "Output fields exactly: handled (bool), action (string), generation_prompt (string), short_caption_ar (string), needs_followup (bool), followup_question (string). "
+                        "Valid action values: none, generate_new, edit_last, variation, describe_last, clarify. "
                         "Rules: "
-                        "1) If the message is ordinary chat and not about image generation/continuation, handled=false. "
-                        "2) If there is an active image and the user says things like make it, change it, same one but, remove, add, "
-                        "خليها, نفس الصورة, بدّل, رجّع, غيّر, then handled=true and usually action=edit_last or variation. "
-                        "3) The generation_prompt must be a fully self-contained English prompt ready for image generation. "
-                        "4) If modifying the last image, preserve the previous style, composition, and subject identity unless the user explicitly changes them. "
-                        "5) If there is no active image and the message is too vague for a new image, handled=true, action=clarify, needs_followup=true. "
-                        "6) short_caption_ar should be a very short Arabic description of the intended image. "
-                        "7) Never require the user to say draw/ارسم explicitly. Infer intent from context. "
-                        "8) If pending_image_action exists and the new message is an answer to that pending question, resolve it. "
-                        "9) If user wants a direct edit of an uploaded real photo, still treat it as handled=true only if there is active generated image context; otherwise ask a short clarification question because current tool path regenerates from prompt context."
+                        "1) If the message is ordinary chat and not about image generation or continuation, handled=false. "
+                        "2) Having an active_image does NOT mean the next image-related message is automatically an edit. "
+                        "3) If the user asks for a clearly new subject, scene, or concept, choose generate_new even if there is an active image. "
+                        "4) Choose edit_last only when the user clearly refers to the previous image: خليها, عدلها, نفس الصورة, نفسها, شيل منها, زود عليها, نفس الفكرة but changed. "
+                        "5) Choose variation when the user wants another version: نسخة ثانية, variation, another version, واحدة ثانية من نفس الفكرة. "
+                        "6) Choose describe_last ONLY when user asks to describe or explain the current image: اوصفها, وصفيها, شو فيها, شو في الصورة, احكيلي عنها, describe it, what's in it. Do NOT treat these as edit requests. "
+                        "7) If the user message introduces a new main subject or standalone scene, treat it as generate_new, not edit_last. "
+                        "8) Example: active image is a cartoon cat. User says 'بدي صورة مدينة مستقبلية' => generate_new. "
+                        "9) Example: active image is a cartoon cat. User says 'خليها بمدينة' => edit_last. "
+                        "10) Example: user says 'اوصفيها' or 'شو فيها' => describe_last. "
+                        "11) Example: user says 'اعمل نسخة ثانية' => variation. "
+                        "12) The generation_prompt must be a fully self-contained English image prompt. "
+                        "13) If modifying the last image, preserve the previous style unless user explicitly changes it. "
+                        "14) If the request is too vague, choose clarify and ask one short Arabic question. "
+                        "15) If pending_image_action exists and the new message answers it, resolve it. "
+                        "16) short_caption_ar should be a very short natural Arabic description of the intended image. "
                     ),
                 },
                 {
                     "role": "user",
                     "content": (
                         f"active_image={json.dumps(active_image, ensure_ascii=False)}\n"
+                        f"recent_history={recent_history_text}\n"
                         f"pending_image_action={json.dumps(pending_image_action, ensure_ascii=False)}\n"
                         f"message={text}"
                     ),
@@ -150,7 +197,7 @@ def plan_image_action_with_ai(
 
     handled = bool(payload.get("handled", False))
     action = str(payload.get("action", "none") or "none").strip().lower()
-    if action not in {"none", "generate_new", "edit_last", "variation", "clarify"}:
+    if action not in {"none", "generate_new", "edit_last", "variation", "describe_last", "clarify"}:
         action = "none"
 
     generation_prompt = str(payload.get("generation_prompt", "") or "").strip()
@@ -159,25 +206,23 @@ def plan_image_action_with_ai(
     followup_question = str(payload.get("followup_question", "") or "").strip()
 
     if handled:
-        if action == "clarify":
-            if active_image and text:
-                action = "edit_last"
+        if action == "generate_new" and not generation_prompt and text and len(text.split()) >= 2:
+            generation_prompt = _fallback_new_image_prompt(text)
+            short_caption_ar = short_caption_ar or text
+            needs_followup = False
+            followup_question = ""
+
+        elif action in {"edit_last", "variation"}:
+            if not active_image:
+                action = "clarify"
+                generation_prompt = ""
+                needs_followup = True
+                followup_question = "ما عندي صورة سابقة أعدل عليها. ابعت وصف صورة جديدة."
+            elif not generation_prompt and text:
                 generation_prompt = _fallback_edit_image_prompt(text, active_image)
                 short_caption_ar = short_caption_ar or text
                 needs_followup = False
                 followup_question = ""
-            elif text and len(text.split()) >= 2:
-                action = "generate_new"
-                generation_prompt = _fallback_new_image_prompt(text)
-                short_caption_ar = short_caption_ar or text
-                needs_followup = False
-                followup_question = ""
-
-        elif action in {"edit_last", "variation"} and not generation_prompt and active_image and text:
-            generation_prompt = _fallback_edit_image_prompt(text, active_image)
-            short_caption_ar = short_caption_ar or text
-            needs_followup = False
-            followup_question = ""
 
     return {
         "handled": handled,
@@ -217,6 +262,7 @@ def render_image_reply_with_ai(
                         "Do not sound robotic. "
                         "If success is true, sound warm and confident. "
                         "If success is false, sound brief, clear, and helpful. "
+                        "If action is describe_last, describe the current image naturally in 1-2 short Arabic sentences. "
                         "Return only the final Arabic reply text."
                     ),
                 },
@@ -249,7 +295,7 @@ def handle_image_message(
     generate_image_with_azure_fn,
     azure_openai_client: Any,
     azure_openai_image_deployment: Optional[str],
-    size: str = "512x512",
+    size: str = "1024x1024",
 ) -> Dict[str, Any]:
     image_state = ensure_image_state(session)
     plan = plan_image_action_with_ai(
@@ -260,6 +306,35 @@ def handle_image_message(
 
     if not plan.get("handled"):
         return {"handled": False}
+    if plan.get("action") == "describe_last":
+        active_image = image_state.get("active_image") or {}
+        image_state["pending_image_action"] = None
+
+        description_seed = (
+            active_image.get("short_caption_ar")
+            or active_image.get("user_request")
+            or "الصورة السابقة"
+        )
+
+        reply_text = render_image_reply_with_ai(
+            create_chat_completion_fn=create_chat_completion_fn,
+            user_message=user_message,
+            plan={
+                **plan,
+                "short_caption_ar": description_seed,
+            },
+            success=True,
+            fallback_text=f"الصورة السابقة كانت تقريبًا: {description_seed}",
+        )
+
+        return {
+            "handled": True,
+            "success": True,
+            "needs_followup": False,
+            "text_only": True,
+            "reply_text": reply_text,
+            "plan": plan,
+        }
 
     if plan.get("needs_followup") or not plan.get("generation_prompt"):
         image_state["pending_image_action"] = {

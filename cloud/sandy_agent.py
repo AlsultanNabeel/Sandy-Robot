@@ -270,6 +270,8 @@ create_chat_completion = make_chat_completion_fn(
     openai_model=OPENAI_MODEL,
     azure_chat_deployment=AZURE_OPENAI_CHAT_DEPLOYMENT,
 )
+from app.agent._learning_client import set_learning_completion_fn
+set_learning_completion_fn(create_chat_completion)
 
 telegram_bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN, threaded=True)
 scheduler = BackgroundScheduler(timezone=None)

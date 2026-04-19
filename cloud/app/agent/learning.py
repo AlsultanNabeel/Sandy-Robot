@@ -53,30 +53,59 @@ def should_ask_question_smart(memory: Dict[str, Any], fact_type: str) -> bool:
 
 
 def extract_facts_from_message(message: str, memory: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """استخرج حقائق جديدة من رسالة المستخدم"""
-    facts = []
+    """استخرج حقائق جديدة من رسالة المستخدم باستخدام AI"""
+    from app.integrations.openai_client import make_chat_completion_fn
+    import json
 
-    patterns = {
-        "سمي|اسمي|اسمي هو|أنا اسمي": "owner_name",
-        "اشتغل|وظيفتي|اشتغل في|أعمل في": "owner_job",
-        "عمري|سني|اسكن|أسكن في": "owner_info",
-        "أحب|بحب|يعجبني": "owner_preference",
-        "ساندي|اسمك|اسمي": "sandy_info",
-    }
+    existing_facts = [f.get("text", "") for f in memory.get("facts", [])[-20:]]
 
-    for pattern, fact_type in patterns.items():
-        if any(word in message for word in pattern.split("|")):
-            facts.append(
+    try:
+        from app.agent._learning_client import get_learning_completion_fn
+        create_fn = get_learning_completion_fn()
+    except Exception:
+        return []
+
+    try:
+        response = create_fn(
+            temperature=0,
+            max_tokens=400,
+            response_format={"type": "json_object"},
+            messages=[
                 {
-                    "type": fact_type,
-                    "text": message,
-                    "timestamp": datetime.now().isoformat(),
-                    "learned": True,
-                }
-            )
-
-    return facts
-
+                    "role": "system",
+                    "content": (
+                        "Extract personal facts about the user from their message. "
+                        "Return JSON only with field: facts (list of objects with: type, text). "
+                        "Types: owner_name, owner_job, owner_info, owner_preference, owner_location, owner_age, owner_interest. "
+                        "Only extract clear, explicit personal facts. "
+                        "If no new facts exist, return {\"facts\": []}. "
+                        "Do not repeat already known facts."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"already_known={json.dumps(existing_facts, ensure_ascii=False)}\n"
+                        f"message={message}"
+                    ),
+                },
+            ],
+        )
+        payload = json.loads(response.choices[0].message.content or "{}")
+        raw_facts = payload.get("facts", [])
+        return [
+            {
+                "type": str(f.get("type", "general")).strip(),
+                "text": str(f.get("text", "")).strip(),
+                "timestamp": datetime.now().isoformat(),
+                "learned": True,
+            }
+            for f in raw_facts
+            if f.get("text", "").strip()
+        ]
+    except Exception as e:
+        print(f"[Learning] ⚠️ AI fact extraction failed: {e}")
+        return []
 
 def generate_learning_questions(user_message: str, memory: Dict[str, Any]) -> Optional[str]:
     """توليد أسئلة ذكية بناءً على الرسالة والمستوى"""
