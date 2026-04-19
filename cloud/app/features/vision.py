@@ -54,6 +54,13 @@ def analyze_image_with_azure(
         return "[think] صار خلل أثناء تحليل الصورة. جرب مرة ثانية."
 
 
+import base64
+import os
+from typing import Any, Optional
+
+import requests
+
+
 def generate_image_with_azure(
     prompt: str,
     *,
@@ -61,35 +68,55 @@ def generate_image_with_azure(
     azure_openai_image_deployment: Optional[str],
     size: str = "1024x1024",
 ) -> Optional[bytes]:
-    """Generate image with Azure OpenAI and return image bytes."""
+    """Generate image with Azure OpenAI via direct REST and return image bytes."""
     if not prompt:
         return None
 
-    if azure_openai_client is None or not azure_openai_image_deployment:
-        print("[Azure Image] ⚠️ Missing Azure OpenAI client or image deployment")
+    endpoint = os.getenv("AZURE_OPENAI_IMAGE_ENDPOINT", "").strip().rstrip("/")
+    api_key = os.getenv("AZURE_OPENAI_IMAGE_API_KEY", "").strip()
+    api_version = os.getenv("AZURE_OPENAI_IMAGE_API_VERSION", "2024-02-01").strip()
+    deployment = (azure_openai_image_deployment or "").strip()
+
+    if not endpoint or not api_key or not deployment:
+        print("[Azure Image] ⚠️ Missing endpoint/api_key/deployment")
         return None
 
-    try:
-        result = azure_openai_client.images.generate(
-            model=azure_openai_image_deployment,
-            prompt=prompt,
-            size=size,
-        )
+    url = f"{endpoint}/openai/deployments/{deployment}/images/generations?api-version={api_version}"
 
-        if not getattr(result, "data", None):
+    headers = {
+        "api-key": api_key,
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "prompt": prompt,
+        "size": size,
+        "quality": "medium",
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=120)
+
+        if response.status_code != 200:
+            print(f"[Azure Image] ❌ Generation failed: {response.status_code} - {response.text}")
+            return None
+
+        data = response.json()
+
+        if not data.get("data"):
             print("[Azure Image] ⚠️ Empty image response")
             return None
 
-        first = result.data[0]
+        first = data["data"][0]
 
-        if getattr(first, "b64_json", None):
-            return base64.b64decode(first.b64_json)
+        if first.get("b64_json"):
+            return base64.b64decode(first["b64_json"])
 
-        if getattr(first, "url", None):
-            response = requests.get(first.url, timeout=30)
-            if response.status_code == 200:
-                return response.content
-            print(f"[Azure Image] ⚠️ URL download failed with {response.status_code}")
+        if first.get("url"):
+            img_response = requests.get(first["url"], timeout=60)
+            if img_response.status_code == 200:
+                return img_response.content
+            print(f"[Azure Image] ⚠️ URL download failed with {img_response.status_code}")
 
     except Exception as e:
         print(f"[Azure Image] ❌ Generation failed: {e}")
