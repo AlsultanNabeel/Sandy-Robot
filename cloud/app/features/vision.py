@@ -91,21 +91,40 @@ def generate_image_with_azure(
     payload = {
         "prompt": prompt,
         "size": size,
-        "quality": "medium",
+        "quality": "standard", # تم التغيير من medium إلى standard
+        "n": 1
     }
 
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=120)
+        import time
 
-        if response.status_code != 200:
+        last_error_text = ""
+
+        for attempt in range(3):
+            response = requests.post(url, headers=headers, json=payload, timeout=120)
+
+            if response.status_code == 200:
+                print(f"[Azure Image] Detailed Error: {response.text}")
+                break
+
+            last_error_text = response.text
+            print(f"[Azure Image] ⚠️ Attempt {attempt + 1}/3 failed: {response.status_code} - {response.text}")
+
+            if response.status_code >= 500:
+                time.sleep(3 * (attempt + 1))
+                continue
+
             print(f"[Azure Image] ❌ Generation failed: {response.status_code} - {response.text}")
             return None
-
+        else:
+            print(f"[Azure Image] ❌ Generation failed after retries: {last_error_text}")
+            return None
         data = response.json()
 
         if not data.get("data"):
             print("[Azure Image] ⚠️ Empty image response")
             return None
+        
 
         first = data["data"][0]
 

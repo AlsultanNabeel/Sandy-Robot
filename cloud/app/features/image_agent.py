@@ -249,7 +249,7 @@ def handle_image_message(
     generate_image_with_azure_fn,
     azure_openai_client: Any,
     azure_openai_image_deployment: Optional[str],
-    size: str = "1024x1024",
+    size: str = "512x512",
 ) -> Dict[str, Any]:
     image_state = ensure_image_state(session)
     plan = plan_image_action_with_ai(

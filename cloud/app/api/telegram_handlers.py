@@ -105,6 +105,7 @@ def register_basic_telegram_handlers(
                     generate_image_with_azure_fn=generate_image_with_azure_fn,
                     azure_openai_client=azure_openai_client,
                     azure_openai_image_deployment=azure_openai_image_deployment,
+                    size="512x512",
                 )
 
             if result is None:
@@ -159,20 +160,9 @@ def register_basic_telegram_handlers(
             if persist_agent_session_fn is not None:
                 persist_agent_session_fn()
 
-            send_text_and_voice_reply_fn(
-                chat_id,
-                result.get("reply_text") or "[happy] جاهزة ✨",
-                telegram_bot=telegram_bot,
-                agent_memory=agent.memory,
-                reply_to_message_id=message.message_id,
-                set_last_assistant_reaction_fn=set_last_assistant_reaction_fn,
-                google_tts_voice=google_tts_voice,
-                google_tts_language_code=google_tts_language_code,
-                mood_tts_voices=mood_tts_voices,
-                azure_speech_available=azure_speech_available,
-                azure_speech_key=azure_speech_key,
-                azure_speech_region=azure_speech_region,
-                azure_speech_voice=azure_speech_voice,
+            telegram_bot.reply_to(
+                message,
+                result.get("reply_text") or "جهزت الصورة.",
             )
         except Exception as e:
             print(f"[Error] Image command handler: {e}")
