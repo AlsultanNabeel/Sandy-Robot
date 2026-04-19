@@ -55,6 +55,7 @@ from app.features.images import (
     is_image_generation_request,
     extract_image_prompt,
 )
+from app.features.image_agent import handle_image_message
 from app.integrations.telegram_api import download_telegram_file_bytes
 from app.integrations.azure_speech import (
     transcribe_audio_with_azure,
@@ -163,12 +164,9 @@ AZURE_OPENAI_CHAT_DEPLOYMENT = os.getenv("AZURE_OPENAI_CHAT_DEPLOYMENT", "").str
 AZURE_OPENAI_VISION_DEPLOYMENT = os.getenv("AZURE_OPENAI_VISION_DEPLOYMENT", "").strip()
 AZURE_OPENAI_STT_DEPLOYMENT = os.getenv("AZURE_OPENAI_STT_DEPLOYMENT", "").strip()
 AZURE_OPENAI_IMAGE_DEPLOYMENT = os.getenv("AZURE_OPENAI_IMAGE_DEPLOYMENT", "").strip()
-AZURE_OPENAI_IMAGE_ENDPOINT = os.getenv("AZURE_OPENAI_IMAGE_ENDPOINT", AZURE_OPENAI_ENDPOINT).strip()
-AZURE_OPENAI_IMAGE_API_KEY = os.getenv("AZURE_OPENAI_IMAGE_API_KEY", AZURE_OPENAI_API_KEY).strip()
-AZURE_OPENAI_IMAGE_API_VERSION = os.getenv(
-    "AZURE_OPENAI_IMAGE_API_VERSION",
-    "2025-04-01-preview",
-).strip()
+AZURE_OPENAI_IMAGE_ENDPOINT = os.getenv("AZURE_OPENAI_IMAGE_ENDPOINT", "").strip()
+AZURE_OPENAI_IMAGE_API_KEY = os.getenv("AZURE_OPENAI_IMAGE_API_KEY", "").strip()
+AZURE_OPENAI_IMAGE_API_VERSION = os.getenv("AZURE_OPENAI_IMAGE_API_VERSION", AZURE_OPENAI_API_VERSION).strip()
 
 # EXA Configuration
 EXA_API_KEY = os.getenv("EXA_API_KEY", "").strip()
@@ -263,7 +261,6 @@ if AZURE_OPENAI_IMAGE_ENDPOINT and AZURE_OPENAI_IMAGE_API_KEY:
             azure_endpoint=AZURE_OPENAI_IMAGE_ENDPOINT,
         )
         print("[Azure Image] ✅ Connected")
-        print(f"[Azure Image Debug] endpoint={AZURE_OPENAI_IMAGE_ENDPOINT} deployment={AZURE_OPENAI_IMAGE_DEPLOYMENT} api_version={AZURE_OPENAI_IMAGE_API_VERSION}")
     except Exception as e:
         print(f"[Azure Image] ⚠️ Failed to initialize: {e}")
 
@@ -608,6 +605,8 @@ register_basic_telegram_handlers(
     generate_image_with_azure_fn=generate_image_with_azure,
     send_text_and_voice_reply_fn=send_text_and_voice_reply,
     set_last_assistant_reaction_fn=_set_last_assistant_reaction,
+    handle_image_message_fn=handle_image_message,
+    persist_agent_session_fn=lambda: save_session(agent.session, session_file=SESSION_FILE, mongo_db=mongo_db),
     google_tts_voice=GOOGLE_TTS_VOICE,
     google_tts_language_code=GOOGLE_TTS_LANGUAGE_CODE,
     mood_tts_voices=MOOD_TTS_VOICES,

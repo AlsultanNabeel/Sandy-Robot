@@ -51,6 +51,8 @@ def register_basic_telegram_handlers(
     create_chat_completion_fn: Callable[..., Any],
     send_text_and_voice_reply_fn: Callable[..., None],
     set_last_assistant_reaction_fn: Optional[Callable[[Optional[str]], None]] = None,
+    handle_image_message_fn: Optional[Callable[..., Dict[str, Any]]] = None,
+    persist_agent_session_fn: Optional[Callable[[], None]] = None,
     google_tts_voice: str = "",
     google_tts_language_code: str = "ar-XA",
     mood_tts_voices: Optional[Dict[str, str]] = None,
@@ -94,38 +96,72 @@ def register_basic_telegram_handlers(
                 return
 
             chat_id = message.chat.id
-            prompt = extract_image_prompt_fn(message.text or "")
-            if not prompt:
-                telegram_bot.reply_to(
-                    message,
-                    "[think] اكتب وصف الصورة بعد الأمر. مثال: /image قطة كرتونية تلبس نظارات",
+            result = None
+            if handle_image_message_fn is not None:
+                result = handle_image_message_fn(
+                    message.text or "",
+                    session=agent.session,
+                    create_chat_completion_fn=create_chat_completion_fn,
+                    generate_image_with_azure_fn=generate_image_with_azure_fn,
+                    azure_openai_client=azure_openai_client,
+                    azure_openai_image_deployment=azure_openai_image_deployment,
                 )
+
+            if result is None:
+                prompt = extract_image_prompt_fn(message.text or "")
+                if not prompt:
+                    telegram_bot.reply_to(
+                        message,
+                        "[think] اكتب وصف الصورة بعد الأمر. مثال: /image قطة كرتونية تلبس نظارات",
+                    )
+                    return
+
+                telegram_bot.send_chat_action(chat_id, "upload_photo")
+                image_bytes = generate_image_with_azure_fn(
+                    prompt,
+                    azure_openai_client=azure_openai_client,
+                    azure_openai_image_deployment=azure_openai_image_deployment,
+                )
+                if not image_bytes:
+                    telegram_bot.reply_to(
+                        message,
+                        "[think] ما قدرت أولد الصورة. تأكد من AZURE_OPENAI_IMAGE_DEPLOYMENT.",
+                    )
+                    return
+
+                result = {
+                    "handled": True,
+                    "success": True,
+                    "image_bytes": image_bytes,
+                    "caption": f"[happy] تفضّل ✨\nالوصف: {prompt}",
+                    "reply_text": "[happy] ولدت الصورة بنجاح ✨ إذا بدك أعدل الستايل ابعتلي وصف جديد.",
+                }
+
+            if result.get("needs_followup"):
+                if persist_agent_session_fn is not None:
+                    persist_agent_session_fn()
+                telegram_bot.reply_to(message, result.get("reply_text") or "[think] وضّحلي أكثر الصورة اللي بدك ياها.")
+                return
+
+            if not result.get("success"):
+                telegram_bot.reply_to(message, result.get("reply_text") or "[think] ما قدرت أولد الصورة حالياً.")
                 return
 
             telegram_bot.send_chat_action(chat_id, "upload_photo")
-            image_bytes = generate_image_with_azure_fn(
-                prompt,
-                azure_openai_client=azure_openai_client,
-                azure_openai_image_deployment=azure_openai_image_deployment,
-            )
-            if not image_bytes:
-                telegram_bot.reply_to(
-                    message,
-                    "[think] ما قدرت أولد الصورة. تأكد من AZURE_OPENAI_IMAGE_DEPLOYMENT.",
-                )
-                return
-
-            photo_file = io.BytesIO(image_bytes)
+            photo_file = io.BytesIO(result["image_bytes"])
             photo_file.name = "sandy_generated.png"
             telegram_bot.send_photo(
                 chat_id,
                 photo_file,
-                caption=f"[happy] تفضّل ✨\nالوصف: {prompt}",
+                caption=result.get("caption") or "[happy] هاي الصورة ✨",
             )
+
+            if persist_agent_session_fn is not None:
+                persist_agent_session_fn()
 
             send_text_and_voice_reply_fn(
                 chat_id,
-                "[happy] ولدت الصورة بنجاح ✨ إذا بدك أعدل الستايل ابعتلي وصف جديد.",
+                result.get("reply_text") or "[happy] جاهزة ✨",
                 telegram_bot=telegram_bot,
                 agent_memory=agent.memory,
                 reply_to_message_id=message.message_id,
@@ -305,13 +341,23 @@ def register_basic_telegram_handlers(
                 telegram_bot.reply_to(message, "[think] ما وصلني نص الرسالة.")
                 return
 
-            if is_image_generation_request_fn(user_message):
+            image_result = None
+            if handle_image_message_fn is not None:
+                image_result = handle_image_message_fn(
+                    user_message,
+                    session=agent.session,
+                    create_chat_completion_fn=create_chat_completion_fn,
+                    generate_image_with_azure_fn=generate_image_with_azure_fn,
+                    azure_openai_client=azure_openai_client,
+                    azure_openai_image_deployment=azure_openai_image_deployment,
+                )
+
+            if image_result is None and is_image_generation_request_fn(user_message):
                 prompt = extract_image_prompt_fn(user_message)
                 if not prompt:
                     telegram_bot.reply_to(message, "[think] اكتب وصف واضح للصورة اللي بدك ياها.")
                     return
 
-                telegram_bot.send_chat_action(chat_id, "upload_photo")
                 image_bytes = generate_image_with_azure_fn(
                     prompt,
                     azure_openai_client=azure_openai_client,
@@ -324,17 +370,39 @@ def register_basic_telegram_handlers(
                     )
                     return
 
-                photo_file = io.BytesIO(image_bytes)
+                image_result = {
+                    "handled": True,
+                    "success": True,
+                    "image_bytes": image_bytes,
+                    "caption": f"[happy] هاي الصورة اللي طلبتها ✨\nالوصف: {prompt}",
+                    "reply_text": "[happy] جاهزة 👌 إذا بدك نسخة ثانية بستايل مختلف احكيلي الوصف الجديد.",
+                }
+
+            if image_result and image_result.get("handled"):
+                if image_result.get("needs_followup"):
+                    if persist_agent_session_fn is not None:
+                        persist_agent_session_fn()
+                    telegram_bot.reply_to(message, image_result.get("reply_text") or "[think] وضّحلي أكثر الصورة اللي بدك ياها.")
+                    return
+
+                if not image_result.get("success"):
+                    telegram_bot.reply_to(message, image_result.get("reply_text") or "[think] ما قدرت أولد الصورة حالياً.")
+                    return
+
+                telegram_bot.send_chat_action(chat_id, "upload_photo")
+                photo_file = io.BytesIO(image_result["image_bytes"])
                 photo_file.name = "sandy_generated.png"
                 telegram_bot.send_photo(
                     chat_id,
                     photo_file,
-                    caption=f"[happy] هاي الصورة اللي طلبتها ✨\nالوصف: {prompt}",
+                    caption=image_result.get("caption") or "[happy] هاي الصورة اللي طلبتها ✨",
                     reply_to_message_id=message.message_id,
                 )
+                if persist_agent_session_fn is not None:
+                    persist_agent_session_fn()
                 send_text_and_voice_reply_fn(
                     chat_id,
-                    "[happy] جاهزة 👌 إذا بدك نسخة ثانية بستايل مختلف احكيلي الوصف الجديد.",
+                    image_result.get("reply_text") or "[happy] جاهزة ✨",
                     telegram_bot=telegram_bot,
                     agent_memory=agent.memory,
                     reply_to_message_id=message.message_id,
